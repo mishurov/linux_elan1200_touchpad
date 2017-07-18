@@ -4,5 +4,6 @@ A linux kernel module for a ElanTech touchpad. The default hid-multitouch driver
 <br/><br/>
 The repository also contains a userspace driver, based on https://github.com/redmcg/FTE1001 which can be used for debugging the data from a hidraw device.
 <br/><br/>
+
 ### Problem report
 https://bugzilla.kernel.org/show_bug.cgi?id=120181
