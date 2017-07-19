@@ -7,6 +7,8 @@ the delta between the coordinates of the touch and release events which decides 
 <br/><br/>
 The repository also contains a userspace driver, based on https://github.com/redmcg/FTE1001 which can be used for debugging the data from a hidraw device.
 <br/><br/>
+I also added an optional patch for the xorg synaptics driver 1.9.0, which adds an additional property, "MaxTapMoveTwoFingers", in order to have an ability to make rules for two-finger taps more strict than for single-finger taps.
+<br/><br/>
 
 The driver is tested on Debian 9, kernel 4.9.
 

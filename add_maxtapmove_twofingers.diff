@@ -1,0 +1,51 @@
+diff --git a/src/synaptics.c b/src/synaptics.c
+index c7ba9ad..90e7a7e 100644
+--- a/src/synaptics.c
++++ b/src/synaptics.c
+@@ -671,6 +671,7 @@ set_default_parameters(InputInfoPtr pInfo)
+     pars->finger_high = xf86SetIntOption(opts, "FingerHigh", fingerHigh);
+     pars->tap_time = xf86SetIntOption(opts, "MaxTapTime", 180);
+     pars->tap_move = xf86SetIntOption(opts, "MaxTapMove", tapMove);
++    pars->tap_move_2 = xf86SetIntOption(opts, "MaxTapMoveTwoFingers", tapMove);
+     pars->tap_time_2 = xf86SetIntOption(opts, "MaxDoubleTapTime", 180);
+     pars->click_time = xf86SetIntOption(opts, "ClickTime", 100);
+     pars->clickpad = xf86SetBoolOption(opts, "ClickPad", pars->clickpad);       /* Probed */
+@@ -1966,15 +1967,23 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
+         priv->finger_state == FS_BLOCKED)
+         return delay;
+ 
++    int delta_x, delta_y;
++    delta_x = abs(hw->x - priv->touch_on.x);
++    delta_y = abs(hw->y - priv->touch_on.y);
++
+     touch = finger >= FS_TOUCHED && priv->finger_state == FS_UNTOUCHED;
+     release = finger == FS_UNTOUCHED && priv->finger_state >= FS_TOUCHED;
+     move = (finger >= FS_TOUCHED &&
+             (priv->tap_max_fingers <=
+              ((priv->horiz_scroll_twofinger_on ||
+                priv->vert_scroll_twofinger_on) ? 2 : 1)) &&
+-            (priv->prevFingers == hw->numFingers &&
+-             ((abs(hw->x - priv->touch_on.x) >= para->tap_move) ||
+-              (abs(hw->y - priv->touch_on.y) >= para->tap_move))));
++            (priv->prevFingers == hw->numFingers && (
++             (priv->tap_max_fingers == 1 &&
++              ((delta_x >= para->tap_move) ||
++               (delta_y >= para->tap_move)) ||
++              priv->tap_max_fingers == 2 &&
++              ((delta_x >= para->tap_move_2) ||
++               (delta_y >= para->tap_move_2))))));
+     press = (hw->left || hw->right || hw->middle);
+ 
+     if (touch) {
+diff --git a/src/synapticsstr.h b/src/synapticsstr.h
+index 33524e5..004595e 100644
+--- a/src/synapticsstr.h
++++ b/src/synapticsstr.h
+@@ -175,6 +175,7 @@ typedef struct _SynapticsParameters {
+     int finger_low, finger_high, finger_press;  /* finger detection values in Z-values */
+     int tap_time;
+     int tap_move;               /* max. tapping time and movement in packets and coord. */
++    int tap_move_2;             /* max. tapping movement of 2 contacts */
+     int single_tap_timeout;     /* timeout to recognize a single tap */
+     int tap_time_2;             /* max. tapping time for double taps */
+     int click_time;             /* The duration of a single click */
