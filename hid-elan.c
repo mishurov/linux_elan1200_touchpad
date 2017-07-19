@@ -11,7 +11,7 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 
 #define MAX_X 3200
 #define MAX_Y 2198
-#define MAX_TOUCH_WIDTH 15
+#define MAX_TOUCH_WIDTH 22
 #define RESOLUTION 31
 
 #define MT_INPUTMODE_TOUCHPAD 0x03
@@ -77,15 +77,18 @@ static void elan_report_input(struct input_dev *input, u8 *data)
 	width = data[11] & 0x0f;
 	height = data[11] >> 4;
 
-	touch_major = max(width, height);
+	touch_major = int_sqrt(width * width + height * height);
 	touch_minor = min(width, height);
 	orientation = width > height;
 
 	input_report_abs(input, ABS_MT_POSITION_X, x);
 	input_report_abs(input, ABS_MT_POSITION_Y, y);
-	input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
-	input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
-	input_report_abs(input, ABS_MT_ORIENTATION, orientation);
+
+	if (is_touch) {
+		input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
+		input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
+		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
+	}
 
 	input_report_key(input, BTN_TOUCH, is_touch);
 
