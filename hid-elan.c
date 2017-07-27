@@ -23,6 +23,8 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 
 struct elan_drvdata {
 	struct input_dev *input;
+	int num_expected;
+	int num_received;
 };
 
 static void elan_report_tool_width(struct input_dev *input)
@@ -54,9 +56,11 @@ static void elan_report_tool_width(struct input_dev *input)
 	}
 }
 
-static void elan_report_input(struct input_dev *input, u8 *data)
+static void elan_process_input(struct elan_drvdata *td, u8 *data)
 {
-	int x, y, width, height, touch_major, touch_minor;
+	struct input_dev *input = td->input;
+
+	int x, y, width, height, touch_major, touch_minor, num_contacts;
 	bool orientation;
 	int toolType = (data[9] & 0x0f) < 9 ? MT_TOOL_FINGER : MT_TOOL_PALM;
 
@@ -67,9 +71,6 @@ static void elan_report_input(struct input_dev *input, u8 *data)
 	bool is_fake = (data[1] == 0x41 && data[2] == 0xc6);
 
 	if (is_fake || !(is_touch || is_release)) return;
-	
-	input_mt_slot(input, slot);
-	input_mt_report_slot_state(input, toolType, is_touch);
 
 	x = (data[3] << 8) | data[2];
 	y = (data[5] << 8) | data[4];
@@ -81,32 +82,36 @@ static void elan_report_input(struct input_dev *input, u8 *data)
 	touch_minor = min(width, height);
 	orientation = width > height;
 
+	input_mt_slot(input, slot);
+	input_mt_report_slot_state(input, toolType, is_touch);
+
 	input_report_abs(input, ABS_MT_POSITION_X, x);
 	input_report_abs(input, ABS_MT_POSITION_Y, y);
+	input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
+	input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
+	input_report_abs(input, ABS_MT_ORIENTATION, orientation);
 
-	if (is_touch) {
-		input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
-		input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
-		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
+	num_contacts = data[8];
+
+	if (num_contacts > 0) {
+		td->num_expected = num_contacts;
+		td->num_received = 1;
+		input_event(input, EV_KEY, BTN_TOOL_FINGER, num_contacts == 1);
+		input_event(input, EV_KEY, BTN_TOOL_DOUBLETAP, num_contacts == 2);
+		input_event(input, EV_KEY, BTN_TOOL_TRIPLETAP, num_contacts == 3);
+		input_event(input, EV_KEY, BTN_TOOL_QUADTAP, num_contacts == 4);
+		input_event(input, EV_KEY, BTN_TOOL_QUINTTAP, num_contacts == 5);
+	} else {
+		td->num_received++;
+	}
+		
+	if (td->num_received >= td->num_expected) {
+		elan_report_tool_width(input);
+		input_mt_sync_frame(input);
+		input_sync(input);
 	}
 
-	input_report_key(input, BTN_TOUCH, is_touch);
-
-	// the first slot always reports contacts count
-	if (is_touch && slot == 0) {
-		int contacts = data[8];
-		input_event(input, EV_KEY, BTN_TOOL_FINGER, contacts == 1);
-		input_event(input, EV_KEY, BTN_TOOL_DOUBLETAP, contacts == 2);
-		input_event(input, EV_KEY, BTN_TOOL_TRIPLETAP, contacts == 3);
-		input_event(input, EV_KEY, BTN_TOOL_QUADTAP, contacts == 4);
-		input_event(input, EV_KEY, BTN_TOOL_QUINTTAP, contacts == 5);
-	}
-
-	elan_report_tool_width(input);
-	
 	input_report_key(input, BTN_LEFT, data[9] & 0x01);
-	input_mt_sync_frame(input);
-	input_sync(input);
 }
 
 static int elan_raw_event(struct hid_device *hdev,
@@ -115,7 +120,7 @@ static int elan_raw_event(struct hid_device *hdev,
 	struct elan_drvdata *drvdata = hid_get_drvdata(hdev);
 
 	if (data[0] == INPUT_REPORT_ID && size == INPUT_REPORT_SIZE) {
-		elan_report_input(drvdata->input, data);
+		elan_process_input(drvdata, data);
 		return 1;
 	}
 
