@@ -11,14 +11,13 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 
 #define MAX_X 3200
 #define MAX_Y 2198
-#define MAX_TOUCH_WIDTH 22
 #define RESOLUTION 31
+#define WIDTH_OFFSET 15
+#define MAX_TOUCH_WIDTH (WIDTH_OFFSET + 22)
 
 #define MT_INPUTMODE_TOUCHPAD 0x03
 #define USB_VENDOR_ID_ELANTECH 0x04f3
 #define USB_DEVICE_ID_ELAN1200_I2C_TOUCHPAD 0x3022
-
-#define TRKID_SGN ((TRKID_MAX + 1) >> 1)
 
 
 struct elan_drvdata {
@@ -27,36 +26,7 @@ struct elan_drvdata {
 	int num_received;
 };
 
-static void elan_report_tool_width(struct input_dev *input)
-{
-	struct input_mt *mt = input->mt;
-	struct input_mt_slot *oldest;
-	int oldid, count, i;
-
-	oldest = NULL;
-	oldid = mt->trkid;
-	count = 0;
-
-	for (i = 0; i < mt->num_slots; ++i) {
-		struct input_mt_slot *ps = &mt->slots[i];
-		int id = input_mt_get_value(ps, ABS_MT_TRACKING_ID);
-
-		if (id < 0)
-			continue;
-		if ((id - oldid) & TRKID_SGN) {
-			oldest = ps;
-			oldid = id;
-		}
-		count++;
-	}
-
-	if (oldest) {
-		input_report_abs(input, ABS_TOOL_WIDTH,
-			input_mt_get_value(oldest, ABS_MT_TOUCH_MAJOR));
-	}
-}
-
-static void elan_process_input(struct elan_drvdata *td, u8 *data)
+static void elan_report_input(struct elan_drvdata *td, u8 *data)
 {
 	struct input_dev *input = td->input;
 
@@ -64,7 +34,7 @@ static void elan_process_input(struct elan_drvdata *td, u8 *data)
 	bool orientation;
 	int toolType = (data[9] & 0x0f) < 9 ? MT_TOOL_FINGER : MT_TOOL_PALM;
 
-	int slot = data[1] >> 4;
+	int slot_num = data[1] >> 4;
 	bool is_touch = (data[1] & 0x0f) == 3;
 	bool is_release = (data[1] & 0x0f) == 1;
 	// the touchpad sometimes generates a fake report
@@ -78,35 +48,31 @@ static void elan_process_input(struct elan_drvdata *td, u8 *data)
 	width = data[11] & 0x0f;
 	height = data[11] >> 4;
 
-	touch_major = int_sqrt(width * width + height * height);
-	touch_minor = min(width, height);
+	touch_major = WIDTH_OFFSET + int_sqrt(width * width + height * height);
+	touch_minor = WIDTH_OFFSET + min(width, height);
 	orientation = width > height;
 
-	input_mt_slot(input, slot);
+	input_mt_slot(input, slot_num);
 	input_mt_report_slot_state(input, toolType, is_touch);
-
-	input_report_abs(input, ABS_MT_POSITION_X, x);
-	input_report_abs(input, ABS_MT_POSITION_Y, y);
-	input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
-	input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
-	input_report_abs(input, ABS_MT_ORIENTATION, orientation);
+	
+	if (is_touch) {
+		input_report_abs(input, ABS_MT_POSITION_X, x);
+		input_report_abs(input, ABS_MT_POSITION_Y, y);
+		input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
+		input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
+		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
+	}
 
 	num_contacts = data[8];
 
 	if (num_contacts > 0) {
 		td->num_expected = num_contacts;
 		td->num_received = 1;
-		input_event(input, EV_KEY, BTN_TOOL_FINGER, num_contacts == 1);
-		input_event(input, EV_KEY, BTN_TOOL_DOUBLETAP, num_contacts == 2);
-		input_event(input, EV_KEY, BTN_TOOL_TRIPLETAP, num_contacts == 3);
-		input_event(input, EV_KEY, BTN_TOOL_QUADTAP, num_contacts == 4);
-		input_event(input, EV_KEY, BTN_TOOL_QUINTTAP, num_contacts == 5);
 	} else {
 		td->num_received++;
 	}
 		
 	if (td->num_received >= td->num_expected) {
-		elan_report_tool_width(input);
 		input_mt_sync_frame(input);
 		input_sync(input);
 	}
@@ -120,7 +86,7 @@ static int elan_raw_event(struct hid_device *hdev,
 	struct elan_drvdata *drvdata = hid_get_drvdata(hdev);
 
 	if (data[0] == INPUT_REPORT_ID && size == INPUT_REPORT_SIZE) {
-		elan_process_input(drvdata, data);
+		elan_report_input(drvdata, data);
 		return 1;
 	}
 
@@ -137,7 +103,6 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, MAX_Y, 0, 0);
 	input_abs_set_res(input, ABS_MT_POSITION_X, RESOLUTION);
 	input_abs_set_res(input, ABS_MT_POSITION_Y, RESOLUTION);
-	input_set_abs_params(input, ABS_TOOL_WIDTH, 0, MAX_TOUCH_WIDTH, 0, 0);
 	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0, MAX_TOUCH_WIDTH, 0, 0);
 	input_set_abs_params(input, ABS_MT_TOUCH_MINOR, 0, MAX_TOUCH_WIDTH, 0, 0);
 	input_set_abs_params(input, ABS_MT_ORIENTATION, 0, 1, 0, 0);
