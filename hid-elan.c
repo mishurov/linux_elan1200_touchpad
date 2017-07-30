@@ -12,8 +12,7 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 #define MAX_X 3200
 #define MAX_Y 2198
 #define RESOLUTION 31
-#define WIDTH_OFFSET 15
-#define MAX_TOUCH_WIDTH (WIDTH_OFFSET + 22)
+#define MAX_TOUCH_WIDTH 15
 
 #define MT_INPUTMODE_TOUCHPAD 0x03
 #define USB_VENDOR_ID_ELANTECH 0x04f3
@@ -30,30 +29,34 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 {
 	struct input_dev *input = td->input;
 
-	int x, y, width, height, touch_major, touch_minor, num_contacts;
+	int x, y, mk_x, mk_y, area_x, area_y, touch_major,
+	    touch_minor, num_contacts;
 	bool orientation;
-	int toolType = (data[9] & 0x0f) < 9 ? MT_TOOL_FINGER : MT_TOOL_PALM;
-
-	int slot_num = data[1] >> 4;
+	int slot_id = data[1] >> 4;
+	int slot_num = input_mt_get_slot_by_key(input, slot_id);
 	bool is_touch = (data[1] & 0x0f) == 3;
 	bool is_release = (data[1] & 0x0f) == 1;
 	// the touchpad sometimes generates a fake report
 	bool is_fake = (data[1] == 0x41 && data[2] == 0xc6);
-
-	if (is_fake || !(is_touch || is_release)) return;
+	
+	if (is_fake || !(is_touch || is_release) ||
+	    slot_num < 0 || slot_num >= MAX_CONTACTS)
+		return;
 
 	x = (data[3] << 8) | data[2];
 	y = (data[5] << 8) | data[4];
 
-	width = data[11] & 0x0f;
-	height = data[11] >> 4;
-
-	touch_major = WIDTH_OFFSET + int_sqrt(width * width + height * height);
-	touch_minor = WIDTH_OFFSET + min(width, height);
-	orientation = width > height;
+	mk_x = data[11] & 0x0f;
+	mk_y = data[11] >> 4;
+	
+	area_x = mk_x * (MAX_X >> 1);
+	area_y = mk_y * (MAX_Y >> 1);
+	touch_major = max(area_x, area_y);
+	touch_minor = min(area_x, area_y);
+	orientation = area_x > area_y;
 
 	input_mt_slot(input, slot_num);
-	input_mt_report_slot_state(input, toolType, is_touch);
+	input_mt_report_slot_state(input, MT_TOOL_FINGER, is_touch);
 	
 	if (is_touch) {
 		input_report_abs(input, ABS_MT_POSITION_X, x);
@@ -61,20 +64,19 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 		input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
 		input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
 		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
+		input_report_abs(input, ABS_TOOL_WIDTH, mk_x);
 	}
 
 	num_contacts = data[8];
 
-	if (num_contacts > 0) {
+	if (num_contacts > 0)
 		td->num_expected = num_contacts;
-		td->num_received = 1;
-	} else {
-		td->num_received++;
-	}
+
+	td->num_received++;
 		
 	if (td->num_received >= td->num_expected) {
 		input_mt_sync_frame(input);
-		input_sync(input);
+		td->num_received = 0;
 	}
 
 	input_report_key(input, BTN_LEFT, data[9] & 0x01);
@@ -99,13 +101,18 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	struct elan_drvdata *drvdata = hid_get_drvdata(hdev);
 
 	int ret;
+
 	input_set_abs_params(input, ABS_MT_POSITION_X, 0, MAX_X, 0, 0);
 	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, MAX_Y, 0, 0);
 	input_abs_set_res(input, ABS_MT_POSITION_X, RESOLUTION);
 	input_abs_set_res(input, ABS_MT_POSITION_Y, RESOLUTION);
-	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0, MAX_TOUCH_WIDTH, 0, 0);
-	input_set_abs_params(input, ABS_MT_TOUCH_MINOR, 0, MAX_TOUCH_WIDTH, 0, 0);
+	// MAX_X is greater than MAX_Y
+	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0,
+	                     MAX_TOUCH_WIDTH * (MAX_X >> 1), 0, 0);
+	input_set_abs_params(input, ABS_MT_TOUCH_MINOR, 0,
+	                     MAX_TOUCH_WIDTH * (MAX_X >> 1), 0, 0);
 	input_set_abs_params(input, ABS_MT_ORIENTATION, 0, 1, 0, 0);
+	input_set_abs_params(input, ABS_TOOL_WIDTH, 0, MAX_TOUCH_WIDTH, 0, 0);
 
 	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
 	__set_bit(BTN_LEFT, input->keybit);
