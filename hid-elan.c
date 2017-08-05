@@ -14,19 +14,54 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 #define RESOLUTION 31
 #define MAX_TOUCH_WIDTH 15
 #define RELEASE_TIMOUT 20
+#define STICKY_TIMOUT 100
 
 #define MT_INPUTMODE_TOUCHPAD 0x03
 #define USB_VENDOR_ID_ELANTECH 0x04f3
 #define USB_DEVICE_ID_ELAN1200_I2C_TOUCHPAD 0x3022
 
+
 struct elan_drvdata {
 	struct input_dev *input;
 	int num_expected;
 	int num_received;
+	struct timer_list sticky_timer;
 	struct timer_list release_timer[MAX_TOUCH_WIDTH];
 	bool timers[MAX_TOUCH_WIDTH];
 	bool being_reported[MAX_TOUCH_WIDTH];
 };
+
+
+static void elan_release_contact(struct elan_drvdata *td,
+								 struct input_dev *input,
+								 int slot_id) {
+	int slot_num;
+	td->being_reported[slot_id] = true;
+	slot_num = input_mt_get_slot_by_key(input, slot_id);
+	input_mt_slot(input, slot_num);
+	input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
+	td->being_reported[slot_id] = false;
+}
+
+
+static void elan_sticky_timeout(unsigned long arg)
+{
+	struct hid_device *hdev = (void *)arg;
+	struct elan_drvdata *td = hid_get_drvdata(hdev);
+	struct input_dev *input = td->input;
+	int i;
+	int released = 0;
+	for(i = 0; i < MAX_CONTACTS; i++) {
+		if (!td->being_reported[i] && !timer_pending(&td->release_timer[i])) {
+			elan_release_contact(td, input, i);
+			released++;
+		}
+	}
+	if (released > 0) {
+		input_mt_sync_frame(input);
+		input_sync(input);
+	}
+}
 
 
 static void elan_expired_timeout(unsigned long arg)
@@ -34,17 +69,13 @@ static void elan_expired_timeout(unsigned long arg)
 	struct hid_device *hdev = (void *)arg;
 	struct elan_drvdata *td = hid_get_drvdata(hdev);
 	struct input_dev *input = td->input;
-	int i, slot_num;
+	int i;
 	int released = 0;
 	
 	for(i = 0; i < MAX_CONTACTS; i++) {
 		if (td->timers[i] && !td->being_reported[i] &&
 			!timer_pending(&td->release_timer[i])) {
-			td->being_reported[i] = true;
-			slot_num = input_mt_get_slot_by_key(input, i);
-			input_mt_slot(input, slot_num);
-			input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
-			td->being_reported[i] = false;
+			elan_release_contact(td, input, i);
 			td->timers[i] = false;
 			released++;
 		}
@@ -106,6 +137,9 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 		return;
 	
 	td->being_reported[slot_id] = true;
+
+	mod_timer(&td->sticky_timer,
+			  jiffies + msecs_to_jiffies(STICKY_TIMOUT));
 
 	input_mt_slot(input, slot_num);
 	input_mt_report_slot_state(input, MT_TOOL_FINGER, is_touch);
@@ -236,7 +270,9 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 					elan_expired_timeout,
 					(long)hdev);
 		drvdata->timers[i] = false;
+		drvdata->being_reported[i] = false;
 	}
+	setup_timer(&drvdata->sticky_timer, elan_sticky_timeout, (long)hdev);
 
 	return 0;
 
@@ -252,6 +288,7 @@ static void elan_remove(struct hid_device *hdev)
 	struct elan_drvdata *td = hid_get_drvdata(hdev);
 	for(i = 0; i < MAX_CONTACTS; i++)
 		del_timer_sync(&td->release_timer[i]);
+	del_timer_sync(&td->sticky_timer);
 	hid_hw_stop(hdev);
 }
 
