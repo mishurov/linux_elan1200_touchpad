@@ -13,8 +13,7 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 #define MAX_Y 2198
 #define RESOLUTION 31
 #define MAX_TOUCH_WIDTH 15
-#define RELEASE_TIMOUT 20
-#define STICKY_TIMOUT 100
+#define RELEASE_TIMEOUT 25
 
 #define MT_INPUTMODE_TOUCHPAD 0x03
 #define USB_VENDOR_ID_ELANTECH 0x04f3
@@ -25,10 +24,10 @@ struct elan_drvdata {
 	struct input_dev *input;
 	int num_expected;
 	int num_received;
-	struct timer_list sticky_timer;
 	struct timer_list release_timer[MAX_TOUCH_WIDTH];
 	bool timers[MAX_TOUCH_WIDTH];
 	bool being_reported[MAX_TOUCH_WIDTH];
+	int coords[MAX_TOUCH_WIDTH][2];
 };
 
 
@@ -40,27 +39,9 @@ static void elan_release_contact(struct elan_drvdata *td,
 	slot_num = input_mt_get_slot_by_key(input, slot_id);
 	input_mt_slot(input, slot_num);
 	input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
+	input_report_abs(input, ABS_MT_POSITION_X, td->coords[slot_id][0]);
+	input_report_abs(input, ABS_MT_POSITION_Y, td->coords[slot_id][1]);
 	td->being_reported[slot_id] = false;
-}
-
-
-static void elan_sticky_timeout(unsigned long arg)
-{
-	struct hid_device *hdev = (void *)arg;
-	struct elan_drvdata *td = hid_get_drvdata(hdev);
-	struct input_dev *input = td->input;
-	int i;
-	int released = 0;
-	for(i = 0; i < MAX_CONTACTS; i++) {
-		if (!td->being_reported[i] && !timer_pending(&td->release_timer[i])) {
-			elan_release_contact(td, input, i);
-			released++;
-		}
-	}
-	if (released > 0) {
-		input_mt_sync_frame(input);
-		input_sync(input);
-	}
 }
 
 
@@ -119,8 +100,10 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	
 	if (is_release) {
 		mod_timer(&td->release_timer[slot_id],
-				  jiffies + msecs_to_jiffies(RELEASE_TIMOUT));
+				  jiffies + msecs_to_jiffies(RELEASE_TIMEOUT));
 		td->timers[slot_id] = true;
+		td->coords[slot_id][0] = x;
+		td->coords[slot_id][1] = y;
 		return;
 	} else if (is_touch && td->timers[slot_id]) {
 		td->timers[slot_id] = false;
@@ -137,10 +120,7 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 		return;
 	
 	td->being_reported[slot_id] = true;
-
-	mod_timer(&td->sticky_timer,
-			  jiffies + msecs_to_jiffies(STICKY_TIMOUT));
-
+	
 	input_mt_slot(input, slot_num);
 	input_mt_report_slot_state(input, MT_TOOL_FINGER, is_touch);
 	
@@ -150,7 +130,6 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 		input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
 		input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
 		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
-		input_report_abs(input, ABS_TOOL_WIDTH, mk_x);
 	}
 
 	td->being_reported[slot_id] = false;
@@ -159,6 +138,7 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 		
 	if (td->num_received >= td->num_expected) {
 		input_mt_sync_frame(input);
+		input_sync(input);
 		td->num_received = 0;
 	}
 }
@@ -187,13 +167,13 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, MAX_Y, 0, 0);
 	input_abs_set_res(input, ABS_MT_POSITION_X, RESOLUTION);
 	input_abs_set_res(input, ABS_MT_POSITION_Y, RESOLUTION);
+
 	// MAX_X is greater than MAX_Y
 	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0,
 	                     MAX_TOUCH_WIDTH * (MAX_X >> 1), 0, 0);
 	input_set_abs_params(input, ABS_MT_TOUCH_MINOR, 0,
 	                     MAX_TOUCH_WIDTH * (MAX_X >> 1), 0, 0);
 	input_set_abs_params(input, ABS_MT_ORIENTATION, 0, 1, 0, 0);
-	input_set_abs_params(input, ABS_TOOL_WIDTH, 0, MAX_TOUCH_WIDTH, 0, 0);
 
 	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
 	__set_bit(BTN_LEFT, input->keybit);
@@ -272,8 +252,6 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		drvdata->timers[i] = false;
 		drvdata->being_reported[i] = false;
 	}
-	setup_timer(&drvdata->sticky_timer, elan_sticky_timeout, (long)hdev);
-
 	return 0;
 
 err_stop_hw:
@@ -288,7 +266,6 @@ static void elan_remove(struct hid_device *hdev)
 	struct elan_drvdata *td = hid_get_drvdata(hdev);
 	for(i = 0; i < MAX_CONTACTS; i++)
 		del_timer_sync(&td->release_timer[i]);
-	del_timer_sync(&td->sticky_timer);
 	hid_hw_stop(hdev);
 }
 
