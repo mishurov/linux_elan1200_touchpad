@@ -19,23 +19,32 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 #define USB_VENDOR_ID_ELANTECH 0x04f3
 #define USB_DEVICE_ID_ELAN1200_I2C_TOUCHPAD 0x3022
 
+#define DMAX 100
+
 
 struct elan_drvdata {
 	struct input_dev *input;
 	int num_expected;
 	int num_received;
 	struct timer_list release_timer[MAX_CONTACTS];
-	bool timers[MAX_TOUCH_WIDTH];
+	bool timers[MAX_CONTACTS];
 	bool being_reported[MAX_CONTACTS];
 	struct input_mt_pos coords[MAX_CONTACTS];
+	int slots[MAX_CONTACTS];
 };
 
 
 static void elan_release_contact(struct elan_drvdata *td,
 								 struct input_dev *input,
 								 int slot_id) {
+	int error;
 	td->being_reported[slot_id] = true;
-	input_mt_slot(input, slot_id);
+	error = input_mt_assign_slots(input, td->slots,
+							td->coords, MAX_CONTACTS, DMAX);
+	if (error)
+		td->slots[slot_id] = slot_id;
+
+	input_mt_slot(input, td->slots[slot_id]);
 	input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
 	input_report_abs(input, ABS_MT_POSITION_X, td->coords[slot_id].x);
 	input_report_abs(input, ABS_MT_POSITION_Y, td->coords[slot_id].y);
@@ -69,7 +78,8 @@ static void elan_expired_timeout(unsigned long arg)
 static void elan_report_input(struct elan_drvdata *td, u8 *data)
 {
 	struct input_dev *input = td->input;
-
+	
+	int error;
 	int x, y, mk_x, mk_y, area_x, area_y, touch_major,
 	    touch_minor, num_contacts;
 	bool orientation;
@@ -119,7 +129,12 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	
 	td->being_reported[slot_id] = true;
 	
-	input_mt_slot(input, slot_id);
+	error = input_mt_assign_slots(input, td->slots,
+							td->coords, MAX_CONTACTS, DMAX);
+	if (error)
+		td->slots[slot_id] = slot_id;
+	
+	input_mt_slot(input, td->slots[slot_id]);
 	input_mt_report_slot_state(input, MT_TOOL_FINGER, is_touch);
 	
 	if (is_touch) {
