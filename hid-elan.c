@@ -24,23 +24,21 @@ struct elan_drvdata {
 	struct input_dev *input;
 	int num_expected;
 	int num_received;
-	struct timer_list release_timer[MAX_TOUCH_WIDTH];
+	struct timer_list release_timer[MAX_CONTACTS];
 	bool timers[MAX_TOUCH_WIDTH];
-	bool being_reported[MAX_TOUCH_WIDTH];
-	int coords[MAX_TOUCH_WIDTH][2];
+	bool being_reported[MAX_CONTACTS];
+	struct input_mt_pos coords[MAX_CONTACTS];
 };
 
 
 static void elan_release_contact(struct elan_drvdata *td,
 								 struct input_dev *input,
 								 int slot_id) {
-	int slot_num;
 	td->being_reported[slot_id] = true;
-	slot_num = input_mt_get_slot_by_key(input, slot_id);
-	input_mt_slot(input, slot_num);
+	input_mt_slot(input, slot_id);
 	input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
-	input_report_abs(input, ABS_MT_POSITION_X, td->coords[slot_id][0]);
-	input_report_abs(input, ABS_MT_POSITION_Y, td->coords[slot_id][1]);
+	input_report_abs(input, ABS_MT_POSITION_X, td->coords[slot_id].x);
+	input_report_abs(input, ABS_MT_POSITION_Y, td->coords[slot_id].y);
 	td->being_reported[slot_id] = false;
 }
 
@@ -76,7 +74,6 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	    touch_minor, num_contacts;
 	bool orientation;
 	int slot_id = data[1] >> 4;
-	int slot_num = input_mt_get_slot_by_key(input, slot_id);
 	bool is_touch = (data[1] & 0x0f) == 3;
 	bool is_release = (data[1] & 0x0f) == 1;
 	// the touchpad sometimes generates a fake report
@@ -98,12 +95,13 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	touch_minor = min(area_x, area_y);
 	orientation = area_x > area_y;
 	
+	td->coords[slot_id].x = x;
+	td->coords[slot_id].y = y;
+
 	if (is_release) {
 		mod_timer(&td->release_timer[slot_id],
 				  jiffies + msecs_to_jiffies(RELEASE_TIMEOUT));
 		td->timers[slot_id] = true;
-		td->coords[slot_id][0] = x;
-		td->coords[slot_id][1] = y;
 		return;
 	} else if (is_touch && td->timers[slot_id]) {
 		td->timers[slot_id] = false;
@@ -121,7 +119,7 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	
 	td->being_reported[slot_id] = true;
 	
-	input_mt_slot(input, slot_num);
+	input_mt_slot(input, slot_id);
 	input_mt_report_slot_state(input, MT_TOOL_FINGER, is_touch);
 	
 	if (is_touch) {
@@ -134,9 +132,8 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 
 	td->being_reported[slot_id] = false;
 
-
-		
 	if (td->num_received >= td->num_expected) {
+		input_mt_drop_unused(input);
 		input_mt_sync_frame(input);
 		input_sync(input);
 		td->num_received = 0;
