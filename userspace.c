@@ -86,6 +86,22 @@ int createUIDev(int ifd) {
 	return res;
 }
 
+int startMultiTouch(int fd) {
+	unsigned char buf[4];
+	/* Set Feature */
+	buf[0] = 0x01; /* Report Number */
+	buf[1] = 0x00;
+	buf[2] = 0x00;
+	buf[3] = 0x00;
+	buf[4] = 0x00;
+	int res = ioctl(fd, HIDIOCSFEATURE(5), buf);
+	if (res < 0)
+		perror("HIDIOCSFEATURE");
+
+	return res;
+}
+
+
 int mainLoop(int fd, int ifd) {
 	unsigned char buf[12];
 	int res = 0;
@@ -236,6 +252,7 @@ int main(int argc, char **argv)
 	}
 
 	//createUIDev(ifd);
+	//startMultiTouch(fd);
 	mainLoop(fd, ifd);
 
 	close(ifd);

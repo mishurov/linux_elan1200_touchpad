@@ -26,47 +26,44 @@ struct elan_drvdata {
 	struct input_dev *input;
 	int num_expected;
 	int num_received;
-	struct timer_list release_timer[MAX_CONTACTS];
-	bool timers[MAX_CONTACTS];
-	bool being_reported[MAX_CONTACTS];
+	struct timer_list release_timer;
+	bool being_reported;
 	struct input_mt_pos coords[MAX_CONTACTS];
+	bool to_release[MAX_CONTACTS];
 };
-
-struct timer_data {
-	struct hid_device *hdev;
-	int slot_id;
-};
-
 
 static void elan_release_contact(struct elan_drvdata *td,
 								 struct input_dev *input,
 								 int slot_id) {
-	td->being_reported[slot_id] = true;
-
 	input_mt_slot(input, slot_id);
 	input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
 	input_report_abs(input, ABS_MT_POSITION_X, td->coords[slot_id].x);
 	input_report_abs(input, ABS_MT_POSITION_Y, td->coords[slot_id].y);
-	
-	input_mt_sync_frame(input);
-	input_sync(input);
-
-	td->being_reported[slot_id] = false;
 }
 
 
 static void elan_expired_timeout(unsigned long arg)
 {
-	struct timer_data *data = (void *)arg;
-	struct hid_device *hdev = data->hdev;
+	struct hid_device *hdev = (void *)arg;
 	struct elan_drvdata *td = hid_get_drvdata(hdev);
 	struct input_dev *input = td->input;
-	int slot_id = data->slot_id;
+
+	int i;
+	bool sync = false;
 	
-	if (!td->timers[slot_id])
-		return;
-	elan_release_contact(td, input, slot_id);
-	td->timers[slot_id] = false;
+	for (i = 0; i < MAX_CONTACTS; i++) {
+		if (td->to_release[i]) {
+			elan_release_contact(td, input, i);
+			sync = true;
+		}
+	}
+
+	if (sync) {
+		td->being_reported = true;
+		input_mt_sync_frame(input);
+		input_sync(input);
+		td->being_reported = false;
+	}
 }
 
 
@@ -97,22 +94,6 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	touch_minor = min(area_x, area_y);
 	orientation = area_x > area_y;
 	
-	td->coords[slot_id].x = x;
-	td->coords[slot_id].y = y;
-	
-	if (is_release) {
-		struct timer_data *data = (void *)td->release_timer[slot_id].data;
-		data->slot_id = slot_id;
-		td->release_timer[slot_id].data = (unsigned long)data;
-		mod_timer(&td->release_timer[slot_id],
-				  jiffies + msecs_to_jiffies(RELEASE_TIMEOUT));
-		td->timers[slot_id] = true;
-		return;
-	} else if (is_touch && td->timers[slot_id]) {
-		td->timers[slot_id] = false;
-		del_timer(&td->release_timer[slot_id]);
-	}
-
 	num_contacts = data[8];
 	if (num_contacts > MAX_CONTACTS)
 		num_contacts = MAX_CONTACTS;
@@ -121,10 +102,12 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 		td->num_expected = num_contacts;
 	td->num_received++;
 
-	if (!td->being_reported[slot_id]) {
+	if (is_touch) {
+		td->to_release[slot_id] = false;
+
 		input_mt_slot(input, slot_id);
 		input_mt_report_slot_state(input, MT_TOOL_FINGER, is_touch);
-		
+	
 		input_report_abs(input, ABS_MT_POSITION_X, x);
 		input_report_abs(input, ABS_MT_POSITION_Y, y);
 		input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
@@ -132,9 +115,21 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
 	}
 
+	if (is_release) {
+		td->to_release[slot_id] = true;
+		td->coords[slot_id].x = x;
+		td->coords[slot_id].y = y;
+	}
+
 	if (td->num_received >= td->num_expected) {
-		input_mt_sync_frame(input);
-		input_sync(input);
+		if (is_release) {
+			mod_timer(&td->release_timer,
+					  jiffies + msecs_to_jiffies(RELEASE_TIMEOUT));
+		}
+		if (is_touch && !td->being_reported) {
+			input_mt_sync_frame(input);
+			input_sync(input);
+		}
 		td->num_received = 0;
 	}
 }
@@ -206,9 +201,8 @@ static int __maybe_unused elan_reset_resume(struct hid_device *hdev)
 
 static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
-	int ret, i;
+	int ret;
 	struct elan_drvdata *drvdata;
-	struct timer_data *data;
 
 	drvdata = devm_kzalloc(&hdev->dev, sizeof(*drvdata), GFP_KERNEL);
 	if (drvdata == NULL) {
@@ -242,19 +236,9 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	if (ret)
 		goto err_stop_hw;
 
-
-	for(i = 0; i < MAX_CONTACTS; i++) {
-		data = (struct timer_data *)kmalloc(
-			sizeof(struct timer_data), GFP_KERNEL
-		);
-		data->hdev = hdev;
-		data->slot_id = 0;
-		setup_timer(&drvdata->release_timer[i],
-					elan_expired_timeout,
-					(unsigned long)data);
-		drvdata->timers[i] = false;
-		drvdata->being_reported[i] = false;
-	}
+	setup_timer(&drvdata->release_timer,
+				elan_expired_timeout,
+				(unsigned long)hdev);
 	return 0;
 
 err_stop_hw:
@@ -265,13 +249,8 @@ err_stop_hw:
 
 static void elan_remove(struct hid_device *hdev)
 {
-	int i;
 	struct elan_drvdata *td = hid_get_drvdata(hdev);
-	for(i = 0; i < MAX_CONTACTS; i++) {
-		struct timer_data *data = (void *)td->release_timer[i].data;
-		kfree(data);
-		del_timer_sync(&td->release_timer[i]);
-	}
+	del_timer_sync(&td->release_timer);
 	hid_hw_stop(hdev);
 }
 
@@ -280,6 +259,10 @@ static int elan_input_mapping(struct hid_device *hdev,
 		struct hid_usage *usage, unsigned long **bit,
 		int *max)
 {
+	
+	printk(KERN_WARNING "usage %x", usage->hid);
+	
+
 	return -1;
 }
 
