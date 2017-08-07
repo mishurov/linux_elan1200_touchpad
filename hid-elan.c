@@ -8,14 +8,14 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 #define INPUT_REPORT_ID 0x04
 #define INPUT_REPORT_SIZE 14
 
-// the touchpad reports fake events with the fifth contact, drop it
+// the touchpad reports fake release events with the fifth contact
+// drop it for the greater good
 #define MAX_CONTACTS 4
 
 #define MAX_X 3200
 #define MAX_Y 2198
 #define RESOLUTION 31
 #define MAX_TOUCH_WIDTH 15
-#define RELEASE_TIMEOUT 20
 
 #define MT_INPUTMODE_TOUCHPAD 0x03
 #define USB_VENDOR_ID_ELANTECH 0x04f3
@@ -26,55 +26,18 @@ struct elan_drvdata {
 	struct input_dev *input;
 	int num_expected;
 	int num_received;
-	struct timer_list release_timer;
-	bool being_reported;
-	struct input_mt_pos coords[MAX_CONTACTS];
-	bool to_release[MAX_CONTACTS];
 };
-
-static void elan_release_contact(struct elan_drvdata *td,
-								 struct input_dev *input,
-								 int slot_id) {
-	input_mt_slot(input, slot_id);
-	input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
-	input_report_abs(input, ABS_MT_POSITION_X, td->coords[slot_id].x);
-	input_report_abs(input, ABS_MT_POSITION_Y, td->coords[slot_id].y);
-}
-
-
-static void elan_expired_timeout(unsigned long arg)
-{
-	struct hid_device *hdev = (void *)arg;
-	struct elan_drvdata *td = hid_get_drvdata(hdev);
-	struct input_dev *input = td->input;
-
-	int i;
-	bool sync = false;
-	
-	for (i = 0; i < MAX_CONTACTS; i++) {
-		if (td->to_release[i]) {
-			elan_release_contact(td, input, i);
-			sync = true;
-		}
-	}
-
-	if (sync) {
-		td->being_reported = true;
-		input_mt_sync_frame(input);
-		input_sync(input);
-		td->being_reported = false;
-	}
-}
-
 
 static void elan_report_input(struct elan_drvdata *td, u8 *data)
 {
 	struct input_dev *input = td->input;
+	struct input_mt *mt = input->mt;
 	
-	int x, y, mk_x, mk_y, area_x, area_y, touch_major,
-	    touch_minor, num_contacts;
-	bool orientation;
+	int x, y, mk_x, mk_y, num_contacts;
+
 	int slot_id = data[1] >> 4;
+	struct input_mt_slot *slot = &mt->slots[slot_id];
+
 	bool is_touch = (data[1] & 0x0f) == 3;
 	bool is_release = (data[1] & 0x0f) == 1;
 
@@ -82,18 +45,6 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	    slot_id < 0 || slot_id >= MAX_CONTACTS)
 		return;
 
-	x = (data[3] << 8) | data[2];
-	y = (data[5] << 8) | data[4];
-
-	mk_x = data[11] & 0x0f;
-	mk_y = data[11] >> 4;
-	
-	area_x = mk_x * (MAX_X >> 1);
-	area_y = mk_y * (MAX_Y >> 1);
-	touch_major = max(area_x, area_y);
-	touch_minor = min(area_x, area_y);
-	orientation = area_x > area_y;
-	
 	num_contacts = data[8];
 	if (num_contacts > MAX_CONTACTS)
 		num_contacts = MAX_CONTACTS;
@@ -101,35 +52,30 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	if (num_contacts > 0)
 		td->num_expected = num_contacts;
 	td->num_received++;
-
-	if (is_touch) {
-		td->to_release[slot_id] = false;
-
-		input_mt_slot(input, slot_id);
-		input_mt_report_slot_state(input, MT_TOOL_FINGER, is_touch);
 	
-		input_report_abs(input, ABS_MT_POSITION_X, x);
-		input_report_abs(input, ABS_MT_POSITION_Y, y);
-		input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major);
-		input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor);
-		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
-	}
+	// ignore dublicates
+	if (input_mt_is_active(slot) && input_mt_is_used(mt, slot))
+		return;
 
-	if (is_release) {
-		td->to_release[slot_id] = true;
-		td->coords[slot_id].x = x;
-		td->coords[slot_id].y = y;
-	}
+	x = (data[3] << 8) | data[2];
+	y = (data[5] << 8) | data[4];
+
+	mk_x = data[11] & 0x0f;
+	mk_y = data[11] >> 4;
+
+	// reduces random taps during two finger scrolls
+	// 4 and 3 due to the width / height ratio
+	if (mk_x < 4 || mk_y < 3)
+		is_touch = false;
+
+	input_mt_slot(input, slot_id);
+	input_mt_report_slot_state(input, MT_TOOL_FINGER, is_touch);
+	
+	input_report_abs(input, ABS_MT_POSITION_X, x);
+	input_report_abs(input, ABS_MT_POSITION_Y, y);
 
 	if (td->num_received >= td->num_expected) {
-		if (is_release) {
-			mod_timer(&td->release_timer,
-					  jiffies + msecs_to_jiffies(RELEASE_TIMEOUT));
-		}
-		if (is_touch && !td->being_reported) {
-			input_mt_sync_frame(input);
-			input_sync(input);
-		}
+		input_mt_sync_frame(input);
 		td->num_received = 0;
 	}
 }
@@ -158,14 +104,7 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, MAX_Y, 0, 0);
 	input_abs_set_res(input, ABS_MT_POSITION_X, RESOLUTION);
 	input_abs_set_res(input, ABS_MT_POSITION_Y, RESOLUTION);
-
-	// MAX_X is greater than MAX_Y
-	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0,
-	                     MAX_TOUCH_WIDTH * (MAX_X >> 1), 0, 0);
-	input_set_abs_params(input, ABS_MT_TOUCH_MINOR, 0,
-	                     MAX_TOUCH_WIDTH * (MAX_X >> 1), 0, 0);
-	input_set_abs_params(input, ABS_MT_ORIENTATION, 0, 1, 0, 0);
-
+	
 	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
 	__set_bit(BTN_LEFT, input->keybit);
 
@@ -236,9 +175,6 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	if (ret)
 		goto err_stop_hw;
 
-	setup_timer(&drvdata->release_timer,
-				elan_expired_timeout,
-				(unsigned long)hdev);
 	return 0;
 
 err_stop_hw:
@@ -249,8 +185,6 @@ err_stop_hw:
 
 static void elan_remove(struct hid_device *hdev)
 {
-	struct elan_drvdata *td = hid_get_drvdata(hdev);
-	del_timer_sync(&td->release_timer);
 	hid_hw_stop(hdev);
 }
 
@@ -259,10 +193,6 @@ static int elan_input_mapping(struct hid_device *hdev,
 		struct hid_usage *usage, unsigned long **bit,
 		int *max)
 {
-	
-	printk(KERN_WARNING "usage %x", usage->hid);
-	
-
 	return -1;
 }
 
