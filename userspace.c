@@ -132,7 +132,7 @@ int mainLoop(int fd, int ifd) {
 				int minor = MIN(mk_x, mk_y);
 				int orientation = mk_x > mk_y;
 
-				int hover_event = buf[9] & 0x40;
+				int con = buf[9];
 				
 				// buf[6] least significant bits of a counter
 				// buf[7] most significant bits of a counter
@@ -140,6 +140,13 @@ int mainLoop(int fd, int ifd) {
 				// buf[9] hover data
 				// buf[10] ?
 				// buf[11] width/height
+
+				if (slot == 0)
+					fprintf(stderr, "id %i x %4d        y %4d        c %2d w %2d h %2d t %i \n", slot, pos_x, pos_y, con, mk_x, mk_y, is_touch);
+				if (slot == 1)
+					fprintf(stderr, "id %i -       %4d  -       %4d  - %2d - %2d - %2d - %i \n", slot, pos_x, pos_y, con, mk_x, mk_y, is_touch);
+
+
 
 				/*
 				fprintf(stderr, "width %i\n", mk_x);
@@ -190,7 +197,7 @@ int mainLoop(int fd, int ifd) {
 
 				ev[evt_idx].type = EV_ABS;
 				ev[evt_idx].code = ABS_DISTANCE;
-				ev[evt_idx++].value = hover_event != 0;
+				ev[evt_idx++].value = con != 0;
 
 				ev[evt_idx].type = EV_KEY;
 				ev[evt_idx].code = BTN_TOUCH;
