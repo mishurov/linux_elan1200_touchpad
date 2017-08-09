@@ -15,4 +15,4 @@ To try lininput driver instead of synaptics is also an option.
 The driver is tested on Debian 9, kernel 4.9.
 
 ### Problem report
-https://bugzilla.kernel.org/show_bug.cgi?id=120181
+https://bugzilla.kernel.org/show_bug.cgi?id=196619
