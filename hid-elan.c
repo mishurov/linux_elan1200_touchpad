@@ -19,10 +19,10 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 
 // may depend on a processor etc
 #define RELEASE_TIMEOUT 14
-// must be longer than Synaptics's MaxTapTime * 2  + RELEASE_TIMEOUT
+// must be longer than Synaptics's MaxTapTime * 2 + RELEASE_TIMEOUT
 #define TOUCH_DURATION 400
 
-#define MT_INPUTMODE_TOUCHPAD 0x03
+#define INPUTMODE_TOUCHPAD 0x03
 #define USB_VENDOR_ID_ELANTECH 0x04f3
 #define USB_DEVICE_ID_ELAN1200_I2C_TOUCHPAD 0x3022
 
@@ -39,8 +39,10 @@ struct elan_drvdata {
 	bool dublicate[MAX_CONTACTS];
 	bool in_touch[MAX_CONTACTS];
 	bool syncing;
+	__s16 inputmode;
+	__s16 inputmode_index;
+	__s16 maxcontact_report_id; 
 };
-
 
 static void elan_release_contact(struct elan_drvdata *td,
 				struct input_dev *input, int slot_id)
@@ -51,6 +53,17 @@ static void elan_release_contact(struct elan_drvdata *td,
 	input_report_abs(input, ABS_MT_POSITION_Y, td->coords[slot_id].y);
 }
 
+static void elan_release_contacts(struct hid_device *hdev)
+{
+	struct elan_drvdata *td = hid_get_drvdata(hdev);
+	struct input_dev *input = td->input;
+	int i;
+	for (i = 0; i < MAX_CONTACTS; i++) {
+		elan_release_contact(td, input, i);
+	}
+	input_mt_sync_frame(input);
+	input_sync(input);
+}
 
 static void elan_release_timeout(unsigned long arg)
 {
@@ -66,6 +79,7 @@ static void elan_release_timeout(unsigned long arg)
 	
 	if (!(input_mt_is_active(slot) && input_mt_is_used(mt, slot))) {
 		elan_release_contact(td, input, slot_id);
+		td->dublicate[slot_id] = true;
 
 		if (!td->syncing) {
 			td->syncing = true;
@@ -174,7 +188,7 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 		    (td->num_received == 1 &&
 		     slot_id == 1 && !td->in_touch[1]) ||
 		    (td->num_received > 1 &&
-		     td->delayed[0] && !td->in_touch[1])) {
+		     (td->delayed[0] || !td->in_touch[1]))) {
 			td->timer_pending = true;
 			mod_timer(&td->release_timer,
 				  jiffies + msecs_to_jiffies(RELEASE_TIMEOUT));
@@ -238,22 +252,102 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	return 0;
 }
 
-static int elan_start_multitouch(struct hid_device *hdev)
+static void elan_set_maxcontacts(struct hid_device *hdev)
 {
+	struct elan_drvdata *td = hid_get_drvdata(hdev);
 	struct hid_report *r;
 	struct hid_report_enum *re;
-	re = &(hdev->report_enum[HID_FEATURE_REPORT]);
-	r = re->report_id_hash[3];
+
+	if (td->maxcontact_report_id < 0)
+		return;
+
+	re = &hdev->report_enum[HID_FEATURE_REPORT];
+	r = re->report_id_hash[td->maxcontact_report_id];
 	if (r) {
-		r->field[0]->value[0] = MT_INPUTMODE_TOUCHPAD;
+		if (r->field[0]->value[0] != MAX_CONTACTS) {
+			r->field[0]->value[0] = MAX_CONTACTS;
+			hid_hw_request(hdev, r, HID_REQ_SET_REPORT);
+		}
+	}
+}
+
+static void elan_set_input_mode(struct hid_device *hdev)
+{
+	struct elan_drvdata *td = hid_get_drvdata(hdev);
+	struct hid_report *r;
+	struct hid_report_enum *re;
+
+	if (td->inputmode < 0)
+		return;
+
+	re = &(hdev->report_enum[HID_FEATURE_REPORT]);
+	r = re->report_id_hash[td->inputmode];
+	if (r) {
+		r->field[0]->value[td->inputmode_index] = INPUTMODE_TOUCHPAD;
 		hid_hw_request(hdev, r, HID_REQ_SET_REPORT);
 	}
-	return 0;
 }
+
+static void elan_get_feature(struct hid_device *hdev, struct hid_report *report)
+{
+	int ret, size = hid_report_len(report);
+	u8 *buf;
+
+	buf = hid_alloc_report_buf(report, GFP_KERNEL);
+	if (!buf)
+		return;
+
+	ret = hid_hw_raw_request(hdev, report->id, buf, size,
+				 HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
+	if (ret < 0) {
+		dev_warn(&hdev->dev, "failed to fetch feature %d\n",
+			 report->id);
+	} else {
+		ret = hid_report_raw_event(hdev, HID_FEATURE_REPORT, buf,
+					   size, 0);
+		if (ret)
+			dev_warn(&hdev->dev, "failed to report feature\n");
+	}
+	kfree(buf);
+}
+
+static void elan_feature_mapping(struct hid_device *hdev,
+			struct hid_field *field, struct hid_usage *usage)
+{
+
+	struct elan_drvdata *td = hid_get_drvdata(hdev);
+
+	switch (usage->hid) {
+	case HID_DG_INPUTMODE:
+		if (td->inputmode < 0) {
+			td->inputmode = field->report->id;
+			td->inputmode_index = usage->usage_index;
+		}
+		break;
+	case HID_DG_CONTACTMAX:
+		elan_get_feature(hdev, field->report);
+		td->maxcontact_report_id = field->report->id;
+		break;
+	default:
+		if (usage->usage_index == 0) {
+			elan_get_feature(hdev, field->report);
+		}
+	}
+}
+
 
 static int __maybe_unused elan_reset_resume(struct hid_device *hdev)
 {
-	return elan_start_multitouch(hdev);
+	elan_release_contacts(hdev);
+	elan_set_maxcontacts(hdev);
+	elan_set_input_mode(hdev);
+	return 0;
+}
+
+static int elan_resume(struct hid_device *hdev)
+{
+	hid_hw_idle(hdev, 0, 0, HID_REQ_SET_IDLE);
+	return 0;
 }
 
 static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
@@ -289,9 +383,9 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	}
 
 	drvdata->input->name = "Elan TouchPad";
-	ret = elan_start_multitouch(hdev);
-	if (ret)
-		goto err_stop_hw;
+
+	elan_set_maxcontacts(hdev);
+	elan_set_input_mode(hdev);
 	
 	setup_timer(&drvdata->release_timer,
 			elan_release_timeout,
@@ -332,10 +426,12 @@ static struct hid_driver elan_driver = {
 	.id_table			= elan_devices,
 	.probe 				= elan_probe,
 	.remove				= elan_remove,
+	.feature_mapping 		= elan_feature_mapping,
 	.input_mapping			= elan_input_mapping,
 	.input_configured		= elan_input_configured,
 #ifdef CONFIG_PM
 	.reset_resume			= elan_reset_resume,
+	.resume 			= elan_resume,
 #endif
 	.raw_event			= elan_raw_event
 };
