@@ -142,9 +142,9 @@ int mainLoop(int fd, int ifd) {
 				// buf[11] width/height
 
 				if (slot == 0)
-					fprintf(stderr, "r %i id %i x %4d        y %4d        c %2d w %2d h %2d t %i \n", num_contacts, slot, pos_x, pos_y, con, mk_x, mk_y, is_touch);
+					fprintf(stderr, "r %i id %i x %4d        y %4d        c %x w %2d h %2d t %i \n", num_contacts, slot, pos_x, pos_y, con, mk_x, mk_y, is_touch);
 				if (slot == 1)
-					fprintf(stderr, "r %i id %i -       %4d  -       %4d  - %2d - %2d - %2d - %i \n", num_contacts, slot, pos_x, pos_y, con, mk_x, mk_y, is_touch);
+					fprintf(stderr, "r %i id %i -       %4d  -       %4d  - %x - %2d - %2d - %i \n", num_contacts, slot, pos_x, pos_y, con, mk_x, mk_y, is_touch);
 
 
 
