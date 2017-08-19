@@ -133,6 +133,7 @@ int mainLoop(int fd, int ifd) {
 				int orientation = mk_x > mk_y;
 
 				int con = buf[9];
+				int con2 = buf[10];
 				
 				// buf[6] least significant bits of a counter
 				// buf[7] most significant bits of a counter
@@ -142,9 +143,9 @@ int mainLoop(int fd, int ifd) {
 				// buf[11] width/height
 
 				if (slot == 0)
-					fprintf(stderr, "r %i id %i x %4d        y %4d        c %x w %2d h %2d t %i \n", num_contacts, slot, pos_x, pos_y, con, mk_x, mk_y, is_touch);
+					fprintf(stderr, "r %i id %i x %4d        y %4d        c %2x c2 %2x w %2d h %2d t %i \n", num_contacts, slot, pos_x, pos_y, con,  con2, mk_x, mk_y, is_touch);
 				if (slot == 1)
-					fprintf(stderr, "r %i id %i -       %4d  -       %4d  - %x - %2d - %2d - %i \n", num_contacts, slot, pos_x, pos_y, con, mk_x, mk_y, is_touch);
+					fprintf(stderr, "r %i id %i -       %4d  -       %4d  - %2x -  %2x - %2d - %2d - %i \n", num_contacts, slot, pos_x, pos_y, con,  con2, mk_x, mk_y, is_touch);
 
 
 
