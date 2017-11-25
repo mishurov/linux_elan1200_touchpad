@@ -1,56 +1,48 @@
 diff --git a/src/synaptics.c b/src/synaptics.c
-index c7ba9ad..ad90bd6 100644
+index c7ba9ad..4d98091 100644
 --- a/src/synaptics.c
 +++ b/src/synaptics.c
-@@ -1957,7 +1957,7 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
-                     Bool inside_active_area)
- {
-     SynapticsParameters *para = &priv->synpara;
--    Bool touch, release, is_timeout, move, press;
-+    Bool touch, release, is_timeout, move, press, delayed_release;
-     int timeleft, timeout;
-     enum EdgeType edge;
-     int delay = 1000000000;
-@@ -1977,12 +1977,36 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
+@@ -1977,14 +1977,38 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
                (abs(hw->y - priv->touch_on.y) >= para->tap_move))));
      press = (hw->left || hw->right || hw->middle);
  
-+    if (release && priv->tap_state != TS_DRAG) {
++
++    if (release) {
++        // The artificial releases are followed by the artificial presses
++        // thus I just set a delay and trigger a release if there were
++        // no presses after that, remember a timestamp to hide latency
++        priv->delayed = TRUE;
 +        priv->delayed_millis = now;
 +        priv->delayed_prevFingers = priv->prevFingers;
-+        priv->delayed = TRUE;
-+        /*
-+        A delay to check whether a release is artificial, there's
-+        no need to delay every release since it decreases latency.
-+        */
-+        return clamp(2, 1, delay);
-+    }
-+
-+    delayed_release = FALSE;
-+
-+    if (priv->delayed && hw->numFingers < priv->delayed_prevFingers) {
-+        delayed_release = TRUE;
-+        release = TRUE;
-+        touch = FALSE;
-+        priv->touch_on.millis = priv->delayed_millis;
++        return 22;
 +    }
 +
 +    if (priv->delayed) {
++        release = (priv->prevFingers == hw->numFingers &&
++                   priv->delayed_prevFingers > hw->numFingers);
++        touch = FALSE;
++        if (release) priv->touch_on.millis = priv->delayed_millis;
 +        priv->delayed = FALSE;
 +    }
++
 +
      if (touch) {
          priv->touch_on.x = hw->x;
          priv->touch_on.y = hw->y;
          priv->touch_on.millis = now;
      }
--    else if (release) {
-+    else if (release && !delayed_release) {
++    // The timestamp for a release is already set
++    /*
+     else if (release) {
          priv->touch_on.millis = now;
      }
++    */
++
      if (hw->z > para->finger_high)
+         if (priv->tap_max_fingers < hw->numFingers)
+             priv->tap_max_fingers = hw->numFingers;
 diff --git a/src/synapticsstr.h b/src/synapticsstr.h
-index 33524e5..db0e019 100644
+index 33524e5..346999f 100644
 --- a/src/synapticsstr.h
 +++ b/src/synapticsstr.h
 @@ -268,6 +268,9 @@ struct _SynapticsPrivateRec {
@@ -58,8 +50,8 @@ index 33524e5..db0e019 100644
      int count_packet_finger;    /* packet counter with finger on the touchpad */
      int button_delay_millis;    /* button delay for 3rd button emulation */
 +    Bool delayed;               /* Is a release delayed */
-+    CARD32 delayed_millis;      /* Time when release was delayed */
-+    int delayed_prevFingers;    /* PrevFingers when release was delayed */
++    CARD32 delayed_millis;      /* Timestamp of delaying a release */
++    int delayed_prevFingers;    /* Prev fingers before a delay */
      Bool prev_up;               /* Previous up button value, for double click emulation */
      enum FingerState finger_state;      /* previous finger state */
      CARD32 last_motion_millis;  /* time of the last motion */
