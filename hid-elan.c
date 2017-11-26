@@ -33,6 +33,8 @@ struct elan_drvdata {
 	struct input_dev *input;
 	int num_expected;
 	int num_received;
+	int prev_time;
+	int timestamp;
 	struct timer_list release_timer;
 	struct slot *slots;
 	enum {
@@ -160,6 +162,7 @@ static void elan_report_contacts(struct elan_drvdata *td,
 	}
 
 	input_mt_sync_frame(input);
+	input_event(input, EV_MSC, MSC_TIMESTAMP, td->timestamp);
 	input_sync(input);
 
 	mod_timer(&td->release_timer,
@@ -179,6 +182,7 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	int slot_id = data[1] >> 4;
 	bool is_touch = (data[1] & 0x0f) == 3;
 	bool is_release = (data[1] & 0x0f) == 1;
+	int ts;
 
 	if (!(is_touch || is_release) ||
 	    slot_id < 0 || slot_id >= MAX_CONTACTS)
@@ -192,6 +196,10 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 
 	//width = data[11] & 0x0f;
 	//height = data[11] >> 4;
+
+	ts = (data[7] << 8) + data[6];
+	td->timestamp += (ts - td->prev_time);
+	td->prev_time = ts;
 
 	td->slots[slot_id].coords.x = (data[3] << 8) | data[2];
 	td->slots[slot_id].coords.y = (data[5] << 8) | data[4];
@@ -225,6 +233,7 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 	    td->num_received >= td->num_expected) {
 		elan_report_contacts(td, input);
 		td->num_received = 0;
+		td->timestamp = 0;
 	}
 }
 
