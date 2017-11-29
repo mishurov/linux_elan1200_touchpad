@@ -15,6 +15,7 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 #define MAX_CONTACTS 5
 
 #define RELEASE_TIMEOUT 22
+#define MAX_TIMESTAMP 1000000
 
 #define INPUT_MODE_TOUCHPAD 0x03
 #define LATENCY_MODE_NORMAL 0x00
@@ -24,7 +25,6 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 struct slot {
 	struct input_mt_pos coords;
 	bool in_report;
-	bool in_timer_report;
 	bool in_touch;
 	bool delayed;
 };
@@ -73,6 +73,7 @@ static void elan_release_contacts(struct hid_device *hdev)
 	int i;
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		td->slots[i].in_touch = false;
+		td->slots[i].in_report = false;
 		elan_report_contact(td, input, i, false);
 	}
 	input_mt_sync_frame(input);
@@ -83,22 +84,7 @@ static void elan_release_contacts(struct hid_device *hdev)
 static void elan_release_timeout(unsigned long arg)
 {
 	struct hid_device *hdev = (void *)arg;
-	struct elan_drvdata *td = hid_get_drvdata(hdev);
-	struct input_dev *input = td->input;
-	int i;
-	bool sync = false;
-	for (i = 0; i < MAX_CONTACTS; i++) {
-		if (td->slots[i].in_timer_report) {
-			elan_report_contact(td, input, i,
-						td->slots[i].in_touch);
-			td->slots[i].in_timer_report = false;
-			sync = true;
-		}
-	}
-	if (sync) {
-		input_mt_sync_frame(input);
-		input_sync(input);
-	}
+	elan_release_contacts(hdev);
 }
 
 static void elan_report_contacts(struct elan_drvdata *td,
@@ -145,19 +131,12 @@ static void elan_report_contacts(struct elan_drvdata *td,
 	}
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
-		if (td->slots[i].in_report) {
-			if (td->slots[i].delayed) {
-				elan_report_contact(td, input, i, true);
-				td->slots[i].in_timer_report = true;
-			} else {
-				elan_report_contact(td, input, i,
-							td->slots[i].in_touch);
-				td->slots[i].in_timer_report = false;
-			}
-		} else if (td->slots[i].in_timer_report) {
-			elan_report_contact(td, input, i,
-						td->slots[i].in_touch);
-			td->slots[i].in_timer_report = false;
+		if (td->slots[i].in_report && td->slots[i].delayed) {
+			elan_report_contact(td, input, i, true);
+		} else {
+			elan_report_contact(
+				td, input, i, td->slots[i].in_touch
+			);
 		}
 	}
 
@@ -182,7 +161,7 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	int slot_id = data[1] >> 4;
 	bool is_touch = (data[1] & 0x0f) == 3;
 	bool is_release = (data[1] & 0x0f) == 1;
-	int ts;
+	int ts, delta;
 
 	if (!(is_touch || is_release) ||
 	    slot_id < 0 || slot_id >= MAX_CONTACTS)
@@ -198,7 +177,9 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	//height = data[11] >> 4;
 
 	ts = (data[7] << 8) + data[6];
-	td->timestamp += (ts - td->prev_time);
+	delta = ts - td->prev_time;
+	if (delta <= 0) delta = 1;
+	td->timestamp += delta;
 	td->prev_time = ts;
 
 	td->slots[slot_id].coords.x = (data[3] << 8) | data[2];
@@ -233,7 +214,8 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 	    td->num_received >= td->num_expected) {
 		elan_report_contacts(td, input);
 		td->num_received = 0;
-		td->timestamp = 0;
+		if (td->timestamp > MAX_TIMESTAMP)
+			td->timestamp = 0;
 	}
 }
 
@@ -453,7 +435,6 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		td->slots[i].delayed = false;
-		td->slots[i].in_timer_report = false;
 		td->slots[i].in_report = false;
 		td->slots[i].in_touch = false;
 		td->slots[i].coords.x = 0;
