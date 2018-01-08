@@ -31,6 +31,7 @@ struct slot {
 
 struct elan_drvdata {
 	struct input_dev *input;
+	struct hid_device *hdev;
 	int num_expected;
 	int num_received;
 	int prev_time;
@@ -81,9 +82,10 @@ static void elan_release_contacts(struct hid_device *hdev)
 	td->state = INITIAL;
 }
 
-static void elan_release_timeout(unsigned long arg)
+static void elan_release_timeout(struct timer_list *t)
 {
-	struct hid_device *hdev = (void *)arg;
+	struct elan_drvdata *td = from_timer(td, t, release_timer);
+	struct hid_device *hdev = td->hdev;
 	elan_release_contacts(hdev);
 }
 
@@ -444,12 +446,10 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	elan_set_latency(hdev);
 	elan_set_maxcontacts(hdev);
 	elan_set_input_mode(hdev);
-	
+
+	td->hdev = hdev;
 	td->state = INITIAL;
-	
-	setup_timer(&td->release_timer,
-			elan_release_timeout,
-			(unsigned long)hdev);
+	timer_setup(&td->release_timer, elan_release_timeout, 0);
 	return 0;
 
 err_stop_hw:
