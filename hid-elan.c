@@ -228,6 +228,7 @@ static int elan_raw_event(struct hid_device *hdev,
 
 	if (data[0] == INPUT_REPORT_ID && size == INPUT_REPORT_SIZE) {
 		elan_report_input(td, data);
+
 		return 1;
 	}
 	return 0;
@@ -377,8 +378,8 @@ static void elan_feature_mapping(struct hid_device *hdev,
 	}
 }
 
-
-static int __maybe_unused elan_reset_resume(struct hid_device *hdev)
+#ifdef CONFIG_PM
+static int elan_reset_resume(struct hid_device *hdev)
 {
 	elan_release_contacts(hdev);
 	elan_set_latency(hdev);
@@ -392,6 +393,7 @@ static int elan_resume(struct hid_device *hdev)
 	hid_hw_idle(hdev, 0, 0, HID_REQ_SET_IDLE);
 	return 0;
 }
+#endif
 
 static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
@@ -404,29 +406,12 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		return -ENOMEM;
 	}
 
-	hid_set_drvdata(hdev, td);
-	hdev->quirks |= HID_QUIRK_NO_INIT_REPORTS;
+	td->inputmode = -1;
+	td->inputmode_index = -1;
+	td->maxcontact_report_id = -1; 
+	td->latency_report_id = -1;
+	td->latency_index = -1;
 
-	ret = hid_parse(hdev);
-	if (ret) {
-		hid_err(hdev, "Elan hid parse failed: %d\n", ret);
-		return ret;
-	}
-
-	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
-	if (ret) {
-		hid_err(hdev, "Elan hw start failed: %d\n", ret);
-		return ret;
-	}
-
-	if (!td->input) {
-		hid_err(hdev, "Elan input not registered\n");
-		ret = -ENOMEM;
-		goto err_stop_hw;
-	}
-
-	td->input->name = "Elan TouchPad";
-	
 	td->slots = devm_kmalloc_array(&hdev->dev, MAX_CONTACTS,
 					sizeof(struct slot),
 					GFP_KERNEL);
@@ -443,19 +428,49 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		td->slots[i].coords.y = 0;
 	}
 
+	td->state = INITIAL;
+	timer_setup(&td->release_timer, elan_release_timeout, 0);
+
+	hid_set_drvdata(hdev, td);
+
+	td->hdev = hdev;
+
+	hdev->quirks |= HID_QUIRK_NO_INPUT_SYNC;
+	hdev->quirks |= HID_QUIRK_NO_EMPTY_INPUT;
+	hdev->quirks |= HID_QUIRK_NO_INIT_REPORTS;
+
+	ret = hid_parse(hdev);
+	if (ret) {
+		hid_err(hdev, "Elan hid parse failed: %d\n", ret);
+		return ret;
+	}
+
+	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
+
+	if (ret) {
+		hid_err(hdev, "Elan hw start failed: %d\n", ret);
+		return ret;
+	}
+
+	if (!td->input) {
+		hid_err(hdev, "Elan input not registered\n");
+		ret = -ENOMEM;
+		goto err_stop_hw;
+	}
+
+	td->input->name = "Elan TouchPad";
+
 	elan_set_latency(hdev);
 	elan_set_maxcontacts(hdev);
 	elan_set_input_mode(hdev);
 
-	td->hdev = hdev;
-	td->state = INITIAL;
-	timer_setup(&td->release_timer, elan_release_timeout, 0);
 	return 0;
 
 err_stop_hw:
 	hid_hw_stop(hdev);
 	return ret;
 }
+
 
 static void elan_remove(struct hid_device *hdev)
 {
