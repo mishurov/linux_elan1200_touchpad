@@ -5,7 +5,7 @@ A linux kernel module for ElanTech 1200 touchpad in Asus UX310UQ laptop. The way
 The repository also contains a userspace driver, based on https://github.com/redmcg/FTE1001 which can be used for debugging the data from a hidraw device.
 <br/><br/>
 
-The driver is tested on Debian 9, kernels 4.11, 4.13, 4.14
+The driver is tested on Debian 9, kernels 4.11, 4.13, 4.14, 4.17
 
 In 4.14 the API for timers has changed, the code in the latest commits is incompatible with the kernels less than 4.14. There's the tag, "4.13", for the older versions.
 

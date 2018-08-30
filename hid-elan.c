@@ -435,9 +435,9 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	td->hdev = hdev;
 
-	hdev->quirks |= HID_QUIRK_NO_INPUT_SYNC;
-	hdev->quirks |= HID_QUIRK_NO_EMPTY_INPUT;
 	hdev->quirks |= HID_QUIRK_NO_INIT_REPORTS;
+	hdev->quirks |= HID_QUIRK_NO_INPUT_SYNC;
+	//hdev->quirks |= HID_QUIRK_INPUT_PER_APP;
 
 	ret = hid_parse(hdev);
 	if (ret) {
