@@ -1,8 +1,8 @@
 diff --git a/src/synaptics.c b/src/synaptics.c
-index c7ba9ad..4d98091 100644
+index 1df1ca7..8d61d3e 100644
 --- a/src/synaptics.c
 +++ b/src/synaptics.c
-@@ -1977,14 +1977,38 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
+@@ -1977,6 +1977,24 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
                (abs(hw->y - priv->touch_on.y) >= para->tap_move))));
      press = (hw->left || hw->right || hw->middle);
  
@@ -20,8 +20,6 @@ index c7ba9ad..4d98091 100644
 +    if (priv->delayed) {
 +        release = (priv->prevFingers == hw->numFingers &&
 +                   priv->delayed_prevFingers > hw->numFingers);
-+        touch = FALSE;
-+        if (release) priv->touch_on.millis = priv->delayed_millis;
 +        priv->delayed = FALSE;
 +    }
 +
@@ -29,14 +27,10 @@ index c7ba9ad..4d98091 100644
      if (touch) {
          priv->touch_on.x = hw->x;
          priv->touch_on.y = hw->y;
-         priv->touch_on.millis = now;
-     }
-+    // The timestamp for a release is already set
-+    /*
+@@ -1985,6 +2003,7 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
      else if (release) {
          priv->touch_on.millis = now;
      }
-+    */
 +
      if (hw->z > para->finger_high)
          if (priv->tap_max_fingers < hw->numFingers)

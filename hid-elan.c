@@ -38,12 +38,6 @@ struct elan_drvdata {
 	int timestamp;
 	struct timer_list release_timer;
 	struct slot *slots;
-	enum {
-		INITIAL,
-		TWO_IN_TOUCH,
-		ONE_RELEASED,
-		TWO_RELEASED
-	} state;
 	__s16 inputmode;
 	__s16 inputmode_index;
 	__s16 maxcontact_report_id; 
@@ -75,11 +69,11 @@ static void elan_release_contacts(struct hid_device *hdev)
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		td->slots[i].in_touch = false;
 		td->slots[i].in_report = false;
+		td->slots[i].delayed = false;
 		elan_report_contact(td, input, i, false);
 	}
 	input_mt_sync_frame(input);
 	input_sync(input);
-	td->state = INITIAL;
 }
 
 static void elan_release_timeout(struct timer_list *t)
@@ -92,45 +86,7 @@ static void elan_release_timeout(struct timer_list *t)
 static void elan_report_contacts(struct elan_drvdata *td,
 				struct input_dev *input)
 {
-	/*
-	A workaround only for slot 0 and slot 1
-	to prevent random events during two-finger scrolling.
-	*/
 	int i;
-
-	if (td->num_received > 1 &&
-	    td->slots[0].in_touch && td->slots[1].in_touch)
-		td->state = TWO_IN_TOUCH;
-
-	if (td->num_received > 2)
-		td->state = INITIAL;
-
-	switch (td->state) {
-	case INITIAL:
-		break;
-	case TWO_IN_TOUCH:
-		if (td->num_received > 1 &&
-		    td->slots[0].in_touch != td->slots[1].in_touch) {
-			td->state = ONE_RELEASED;
-		}
-		if (td->num_received > 1 &&
-		    !td->slots[0].in_touch && !td->slots[1].in_touch) {
-			td->state = TWO_RELEASED;
-		}
-		break;
-	case ONE_RELEASED:
-		if (td->num_received == 1 &&
-		    !td->slots[0].in_touch && !td->slots[1].in_touch) {
-			td->state = TWO_RELEASED;
-		}
-		break;
-	case TWO_RELEASED:
-		if (td->num_received == 1 &&
-		    td->slots[0].in_touch != td->slots[1].in_touch) {
-			td->state = ONE_RELEASED;
-		}
-		break;
-	}
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		if (td->slots[i].in_report && td->slots[i].delayed) {
@@ -140,6 +96,9 @@ static void elan_report_contacts(struct elan_drvdata *td,
 				td, input, i, td->slots[i].in_touch
 			);
 		}
+
+		td->slots[i].in_report = false;
+		td->slots[i].delayed = false;
 	}
 
 	input_mt_sync_frame(input);
@@ -148,11 +107,6 @@ static void elan_report_contacts(struct elan_drvdata *td,
 
 	mod_timer(&td->release_timer,
 		jiffies + msecs_to_jiffies(RELEASE_TIMEOUT));
-
-	for (i = 0; i < MAX_CONTACTS; i++) {
-		td->slots[i].delayed = false;
-		td->slots[i].in_report = false;
-	}
 }
 
 static void elan_report_input(struct elan_drvdata *td, u8 *data)
@@ -168,8 +122,9 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	if (!(is_touch || is_release) ||
 	    slot_id < 0 || slot_id >= MAX_CONTACTS)
 		return;
-
-	del_timer(&td->release_timer);
+	
+	if (is_touch)
+		del_timer(&td->release_timer);
 
 	td->slots[slot_id].in_report = true;
 	
@@ -187,10 +142,8 @@ static void elan_report_input(struct elan_drvdata *td, u8 *data)
 	td->slots[slot_id].coords.x = (data[3] << 8) | data[2];
 	td->slots[slot_id].coords.y = (data[5] << 8) | data[4];
 
-	if (is_release && slot_id < 2 &&
-	    (td->state == TWO_IN_TOUCH || td->state == ONE_RELEASED)) {
+	if (is_release)
 		td->slots[slot_id].delayed = true;
-	}
 
 	input_report_key(input, BTN_LEFT, data[9] & 0x01);
 
@@ -428,7 +381,6 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		td->slots[i].coords.y = 0;
 	}
 
-	td->state = INITIAL;
 	timer_setup(&td->release_timer, elan_release_timeout, 0);
 
 	hid_set_drvdata(hdev, td);
