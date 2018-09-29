@@ -1,0 +1,47 @@
+diff --git a/common/xfpm-power-common.c b/common/xfpm-power-common.c
+index 95e64bd..209b396 100644
+--- a/common/xfpm-power-common.c
++++ b/common/xfpm-power-common.c
+@@ -159,6 +159,32 @@ is_display_device (UpClient *upower, UpDevice *device)
+     return ret;
+ }
+ 
++gboolean
++is_online(UpClient *upower)
++{
++    GPtrArray *array = up_client_get_devices(upower);
++    gboolean ret = FALSE;
++    if ( array )
++    {
++        for (guint i = 0; i < array->len; i++)
++        {
++            UpDevice *device = g_ptr_array_index(array, i);
++            guint type = 0;
++            gboolean online;
++            g_object_get (device,
++                          "kind", &type,
++                          "online", &online,
++                          NULL);
++            g_object_unref (device);
++            if ( type == UP_DEVICE_KIND_LINE_POWER ) {
++                ret = online;
++            }
++        }
++        g_ptr_array_free (array, TRUE);
++    }
++    return ret;
++}
++
+ gchar*
+ get_device_icon_name (UpClient *upower, UpDevice *device)
+ {
+@@ -222,6 +248,9 @@ get_device_icon_name (UpClient *upower, UpDevice *device)
+     else if ( g_strcmp0 (upower_icon, "") != 0 )
+         icon_name = g_strndup (upower_icon, icon_base_length);
+ 
++    if (g_strcmp0 (upower_icon, "battery-full-symbolic") == 0 && is_online (upower))
++        icon_name = g_strdup ("battery-full-charging-symbolic");
++
+     return icon_name;
+ }
+ 

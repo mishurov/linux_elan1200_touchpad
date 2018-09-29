@@ -14,3 +14,10 @@ If the driver doesn't work well. There's a patch (drop_releases.diff) for xorg s
 
 ### Problem report
 https://bugzilla.kernel.org/show_bug.cgi?id=196619
+
+
+## PS
+![ScreenShot](http://mishurov.co.uk/images/github/linux_elan1200_touchpad/pm.png)
+<br/><br/>
+There's also an ACPI problem related to this family of ASUS laptops. When a battery is fully charged, it goes into the state of discharging at zero rate. I made a patch (pm_asus_patch.diff) for xfce4-power-manager-1.6.1 which shows a correct icon when an AC cable is plugged in. It may be useful for someone.
+
