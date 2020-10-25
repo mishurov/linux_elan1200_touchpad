@@ -50,7 +50,14 @@ Use the userspace driver. It can work without hid-multitouch module. It takes ra
 ```sh
 gcc -o hid_elan1200 hid_elan1200.c -lrt
 ```
-Use run the resulting binary, make it a systemd service for auto load, etc. The directory also contains example Xorg configurations for Synaptics and Libinput drivers which ignore the real device and use the virtual device.
+
+The directory also contains example Xorg configurations for Synaptics and Libinput drivers which ignore the real device and use the virtual device and a simpe systemd service file for autoload, optionally `hid-multitouch` module can be blacklisted.
+```sh
+sudo cp ./hid_elan1200 /usr/local/bin/
+sudo cp elan1200.service /etc/systemd/system/
+sudo chmod 644 /etc/systemd/system/elan1200.service
+sudo systemctl enable elan1200.service
+```
 
 The `mirror_elan1200.c` in the directory just mirrors input events from the input device created by hid-multitouch.
 
