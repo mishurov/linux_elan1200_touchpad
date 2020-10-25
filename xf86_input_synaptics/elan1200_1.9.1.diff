@@ -1,0 +1,68 @@
+diff --git a/src/synaptics.c b/src/synaptics.c
+index 1df1ca7..6d73236 100644
+--- a/src/synaptics.c
++++ b/src/synaptics.c
+@@ -1954,7 +1954,7 @@ GetTimeOut(SynapticsPrivate * priv)
+ static int
+ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
+                     CARD32 now, enum FingerState finger,
+-                    Bool inside_active_area)
++                    Bool inside_active_area, Bool from_timer)
+ {
+     SynapticsParameters *para = &priv->synpara;
+     Bool touch, release, is_timeout, move, press;
+@@ -1977,14 +1977,29 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
+               (abs(hw->y - priv->touch_on.y) >= para->tap_move))));
+     press = (hw->left || hw->right || hw->middle);
+ 
++    if (release) {
++        priv->delayed = TRUE;
++        priv->delayed_millis = now;
++        priv->delayed_prevFingers = priv->prevFingers;
++        return 22;
++    }
++
++    if (priv->delayed && from_timer) {
++        release = (priv->prevFingers == hw->numFingers &&
++                   priv->delayed_prevFingers > hw->numFingers);
++    }
++
+     if (touch) {
+         priv->touch_on.x = hw->x;
+         priv->touch_on.y = hw->y;
+-        priv->touch_on.millis = now;
++        priv->touch_on.millis = priv->delayed ? priv->delayed_millis : now;
+     }
+     else if (release) {
+-        priv->touch_on.millis = now;
++        priv->touch_on.millis = priv->delayed ? priv->delayed_millis : now;
+     }
++
++    priv->delayed = FALSE;
++
+     if (hw->z > para->finger_high)
+         if (priv->tap_max_fingers < hw->numFingers)
+             priv->tap_max_fingers = hw->numFingers;
+@@ -3084,7 +3099,7 @@ HandleState(InputInfoPtr pInfo, struct SynapticsHwState *hw, CARD32 now,
+ 
+     /* tap and drag detection. Needs to be performed even if the finger is in
+      * the dead area to reset the state. */
+-    timeleft = HandleTapProcessing(priv, hw, now, finger, inside_active_area);
++    timeleft = HandleTapProcessing(priv, hw, now, finger, inside_active_area, from_timer);
+     if (timeleft > 0)
+         delay = MIN(delay, timeleft);
+ 
+diff --git a/src/synapticsstr.h b/src/synapticsstr.h
+index 33524e5..0a22dc6 100644
+--- a/src/synapticsstr.h
++++ b/src/synapticsstr.h
+@@ -294,6 +294,9 @@ struct _SynapticsPrivateRec {
+     int lastButtons;            /* last state of the buttons */
+     int prev_z;                 /* previous z value, for palm detection */
+     int prevFingers;            /* previous numFingers, for transition detection */
++    Bool delayed;               /* if release of delayed */
++    CARD32 delayed_millis;      /* time of the delay */
++    int delayed_prevFingers;    /* delayed previous numFingers, for transition detection */
+     int avg_width;              /* weighted average of previous fingerWidth values */
+ #ifndef NO_DRIVER_SCALING
+     double horiz_coeff;         /* normalization factor for x coordintes */

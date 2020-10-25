@@ -1,23 +1,92 @@
-## ELAN1200 touchpad driver
-<br/>
-A linux kernel module for ElanTech 1200 touchpad in Asus UX310UQ laptop. The way the default hid-multitouch driver reports touchpad's data results in random jumps of a cursor and random right-click events caused by the fake two-finger taps during two-finger scrolling. This driver somewhat minimises the glitches by filtering out the unrelated reports from the touchpad.
-<br/><br/>
-The repository also contains a userspace driver, based on https://github.com/redmcg/FTE1001 which can be used for debugging the data from a hidraw device.
-<br/><br/>
-
-The driver is tested on Debian 9, kernels 4.11, 4.13, 4.14, 4.17
-
-In 4.14 the API for timers has changed, the code in the latest commits is incompatible with the kernels less than 4.14. There's the tag, "4.13", for the older versions.
+# ELAN1200 04F3:3022 Touchpad
 
 ## Warning
-If the driver doesn't work well. There's a patch (drop_releases.diff) for xorg synaptics driver 1.9.0 and 1.9.1 which implements the same idea: it drops the artificial releases if a next report is a touch, it happens when the touchpad starts to report two close contacts as one wide contact. Probably to handle those reports in user space is more natural from the architectural point of view.
-
-### Problem report
-https://bugzilla.kernel.org/show_bug.cgi?id=196619
+The code in the repository has been tested and being used with the touchpad installed in **Asus UX310UQ** laptops, **vendor/device 04F3:3022**. The OS is Debian 10 with backports enabled. I can't guarantee it working with other models, revisions, Linux distibutions etc.
 
 
-## PS
+### The problem
+<p>
+<img src="http://mishurov.co.uk/images/github/linux_elan1200_touchpad/state1.png" width="350"/><br/>
+<em>Normal two finger touch state</em>
+<p/>
+<p>
+<img src="http://mishurov.co.uk/images/github/linux_elan1200_touchpad/state2.png" width="350"/><br/>
+<em>When fingers are close enough, the touchpad recognises it as one touch and sends a release report for the second contact</em>
+<p/>
+<img src="http://mishurov.co.uk/images/github/linux_elan1200_touchpad/state3.png" width="350"/><br/>
+<em>When fingers go apart again, the touchpad <strong>sends another release for the remaining contact and immediately sends a report with two fingers</strong> touching the surface</em>
+<p/>
+The aforementioned redundant release report results in random right-click events during scrolling when "double tap" and "two-finger scroll" are enabled.
+
+### The solution
+The repository contains three options to resolve this issue, all of them are basically do the same:
+
+- Got the release report from the hardware
+- Save the event data and set timer for a very short time fraction
+- If next event is immediatelty received, then the release was the malicious one, ignore it
+- If there're no subsecuent events, and the timer is triggered, the release was correct, so emit the saved event
+
+All the solutions have some issuses and limitations yet nonetheless they minimise the annoying behaviour of the touchpad.
+
+#### Option one
+Patch the Synaptics Xorg driver. It would be something like that:
+```sh
+wget https://www.x.org/pub/individual/driver/xf86-input-synaptics-1.9.1.tar.bz2
+tar xf ./xf86-input-synaptics-1.9.1.tar.bz2
+rm ./xf86-input-synaptics-1.9.1.tar.bz2
+cd xf86-input-synaptics-1.9.1/
+git apply /path/to/elan1200_1.9.1.diff
+./configure
+make
+./libtool --mode=install /usr/bin/install -c src/synaptics_drv.la /path/to/somewhere/
+mkdir -p ./rollback
+cp /usr/lib/xorg/modules/input/synaptics_drv.so ./rollback/
+sudo mv /path/to/somewhere/synaptics_drv.so /usr/lib/xorg/modules/input/
+```
+Obviously it is limited to Xorg and Synaptics driver and since I've hacked into the driver's source code it doesn't work ideally.
+
+#### Option two
+Use the userspace driver. It can work without hid-multitouch module. It takes raw HID data from a `/dev/hidraw*` device, creates a virtual `/dev/input/event*` device using the `uinput` module and reports input events according to the Linux Multi-touch (MT) Protocol Type B specification.
+```sh
+gcc -o hid_elan1200 hid_elan1200.c -lrt
+```
+Use run the resulting binary, make it a systemd service for auto load, etc. The directory also contains example Xorg configurations for Synaptics and Libinput drivers which ignore the real device and use the virtual device.
+
+The `mirror_elan1200.c` in the directory just mirrors input events from the input device created by hid-multitouch.
+
+The driver sometimes loses track during very fast and intense movements until fingers are lifted, I still haven't figured the reason behind it.
+
+<br/><br/>
+The repository also contains a userspace driver, based on https://github.com/redmcg/FTE1001 which can be used for debugging the data from a hidraw device.
+
+#### Option three
+The kernel module (No longer supported, the last tested kernel version: 4.17). Since the kernel API changes very fast, I can't do relevant updates because I don't use it. The solution would be conventional but it is buggy: some releases aren't triggered and so on. May be it is because of the incorrect assignment of tracking ids, or timer functionality. I don't know.
+
+The installation is typical as for any module installation. Then blacklist `hid-multitouch`.
+
+
+## Misc for ASUS UX310UQ
 ![ScreenShot](http://mishurov.co.uk/images/github/linux_elan1200_touchpad/pm.png)
 <br/><br/>
-There's also an ACPI problem related to this family of ASUS laptops. When a battery is fully charged, it goes into the state of discharging at zero rate. I made a patch (pm_asus_patch.diff) for xfce4-power-manager-1.6.1 which shows a correct icon when an AC cable is plugged in. It may be useful for someone.
+There's also an ACPI problem related to the laptop. When the battery is fully charged, it goes into the state of "discharging at zero rate". XFCE Power Manager sets the icon which doesn't reflect if power cable is connected. I made a patch `asus_ux310u_1.6.1.diff` in the corresponding directory, for xfce4-power-manager-1.6.1 which shows a correct icon when an AC cable is plugged in.
+```sh
+wget http://http.debian.net/debian/pool/main/x/xfce4-power-manager/xfce4-power-manager_1.6.1.orig.tar.bz2
+tar xf xfce4-power-manager_1.6.1.orig.tar.bz2
+cd xfce4-power-manager-1.6.1
+git apply /path/to/asus_ux310u_1.6.1.diff
+./autogen.sh --disable-silent-rules --with-backend=linux
+./configure --disable-silent-rules --with-backend=linux
+sudo make install
+```
+
+References:
+- https://www.kernel.org/doc/html/latest/input/multi-touch-protocol.html
+- https://www.kernel.org/doc/html/latest/input/uinput.html
+- https://gitlab.freedesktop.org/libevdev/evtest
+- https://github.com/torvalds/linux/blob/master/samples/hidraw/hid-example.c
+- https://github.com/redmcg/FTE1001/blob/master/main.c
+- https://github.com/torvalds/linux/blob/master/drivers/hid/hid-multitouch.c
+
+
+
 

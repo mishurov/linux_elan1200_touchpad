@@ -7,3 +7,6 @@ a.out
 modules.order
 Module.symvers
 .tmp_versions
+.cache.mk
+
+hid_elan1200
