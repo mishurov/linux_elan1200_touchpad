@@ -59,12 +59,7 @@ sudo chmod 644 /etc/systemd/system/elan1200.service
 sudo systemctl enable elan1200.service
 ```
 
-The `mirror_elan1200.c` in the directory just mirrors input events from the input device created by hid-multitouch.
-
-The driver sometimes loses track during very fast and intense movements until fingers are lifted, I still haven't figured the reason behind it.
-
-<br/><br/>
-The repository also contains a userspace driver, based on https://github.com/redmcg/FTE1001 which can be used for debugging the data from a hidraw device.
+The `mirror_elan1200.c` in the directory just mirrors input events from the input device created by hid-multitouch without any modifications. It's my previous attempt to filter hardware reports in userspace.
 
 #### Option three
 The kernel module (No longer supported, the last tested kernel version: 4.17). Since the kernel API changes very fast, I can't do relevant updates because I don't use it. The solution would be conventional but it is buggy: some releases aren't triggered and so on. May be it is because of the incorrect assignment of tracking ids, or timer functionality. I don't know.
