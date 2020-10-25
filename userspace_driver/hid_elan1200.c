@@ -404,8 +404,9 @@ static int start_capture() {
 		goto error;
 	}
 
-	signal(SIGINT, interrupt_handler);
-	signal(SIGTERM, interrupt_handler);
+	struct sigaction int_action = { .sa_handler = interrupt_handler };
+	sigaction(SIGINT, &int_action, 0);
+	sigaction(SIGTERM, &int_action, 0);
 
 	ioctl(fd, EVIOCGRAB, (void*)1);
 
