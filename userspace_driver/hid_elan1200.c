@@ -85,12 +85,12 @@ void timer_thread (union sigval sig)
 	write(rep->vfd, &rep->events, sizeof(rep[0]) * rep->len);
 	current[delayed_slot].track = MT_ID_NULL;
 	delayed_slot = -1;
-	ts.it_value.tv_nsec = 0;
 	pthread_mutex_unlock(&mutex);
 }
 
 
 static int prev_touches = 0;
+static int prev_active = 0;
 
 void send_report(int vfd) {
 	int j = 0;
@@ -135,7 +135,7 @@ void send_report(int vfd) {
 		}
 	}
 
-	if (active_slot >= 0) {
+	if (active_slot > -1 && (prev_active < 0 || prev_active == active_slot)) {
 		report[j].type = EV_ABS;
 		report[j].code = ABS_X;
 		report[j++].value = current[active_slot].x;
@@ -168,7 +168,7 @@ void send_report(int vfd) {
 		memcpy(delayed.events, report, sizeof(report[0]) * j);
 		ts.it_value.tv_nsec = DELAY_NS;
 		timer_settime(timer_id, 0, &ts, 0);
-
+		current[slot_to_delay].track = prev[slot_to_delay].track;
 		current_touches++;
 	} else {
 		pthread_mutex_lock(&mutex);
@@ -177,6 +177,7 @@ void send_report(int vfd) {
 	}
 
 	prev_touches = current_touches;
+	prev_active = active_slot;
 }
 
 
