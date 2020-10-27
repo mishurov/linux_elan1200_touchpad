@@ -1,4 +1,4 @@
-// gcc -o hid_elan1200 hid_elan1200.c -lrt
+// gcc -o hid_elan1200 hid_elan1200.c -lrt -lpthread
 
 #define _GNU_SOURCE
 
@@ -19,11 +19,13 @@
 #define VIRTUAL_DEV_NAME "VirtualELAN1200"
 #define ELAN_NAME "ELAN1200:00 04F3:3022"
 
-#define DELAY 19
+// on my machine 14 ms is minimum, otherwise
+// the timer fires earlier than the next event arrives
+#define DELAY 25
 #define DELAY_NS DELAY * 1000000
 
-#define MAX_X 0x0c80
-#define MAX_Y 0x0896
+#define MAX_X 3200
+#define MAX_Y 2198
 #define RESOLUTION 31
 #define MAX_CONTACTS 5
 
@@ -33,7 +35,7 @@
 #define MT_ID_MIN	0
 #define MT_ID_MAX	65535
 
-
+// interrupts
 static volatile sig_atomic_t stop = 0;
 
 static void interrupt_handler(int sig)
@@ -41,31 +43,28 @@ static void interrupt_handler(int sig)
 	stop = 1;
 }
 
+// state
 struct contact {
 	int in_report;
 	int x;
 	int y;
 	int tool;
-	int track;
+	int touch;
 };
 
-static struct contact current[MAX_CONTACTS];
-static struct contact prev[MAX_CONTACTS];
+static int btn_left = 0;
+static struct contact hw_state[MAX_CONTACTS];
+static struct contact prev_state[MAX_CONTACTS];
+static struct contact delayed_state[MAX_CONTACTS];
+
+// tracking ids
+static unsigned int last_tracking_id = MT_ID_MIN;
+static unsigned int tracking_ids[5] = { [0 ... 4] = MT_ID_NULL };
 
 // report data
 struct input_event report[MAX_EVENTS];
 
-// delayed data
-struct timer_report {
-	int vfd;
-	int len;
-	struct input_event events[MAX_EVENTS];
-} delayed;
-
-static int delayed_slot;
-
 // buttons
-static int btn_left = 0;
 int btn_tools[5] = { BTN_TOOL_FINGER, BTN_TOOL_DOUBLETAP, BTN_TOOL_TRIPLETAP,
 			BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP };
 
@@ -74,75 +73,91 @@ static timer_t timer_id;
 static struct itimerspec ts;
 static struct sigevent se;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-// tracking id counter
-static unsigned int last_track = MT_ID_MIN;
 
 
-void timer_thread (union sigval sig)
-{
-	struct timer_report* rep = (struct timer_report*)sig.sival_ptr;
-	pthread_mutex_lock(&mutex);
-	write(rep->vfd, &rep->events, sizeof(rep[0]) * rep->len);
-	current[delayed_slot].track = MT_ID_NULL;
-	delayed_slot = -1;
-	pthread_mutex_unlock(&mutex);
-}
+static int delayed_slot = -1;
+static int abs_slot = 0;
 
-
-static int prev_touches = 0;
-static int prev_active = 0;
-
-void send_report(int vfd) {
-	int j = 0;
+void send_report(int vfd, int from_timer) {
 	int current_touches = 0;
-	int active_slot = -1;
-	int slot_to_delay = -1;
+	int prev_touches = 0;
+	struct contact *state = from_timer ? delayed_state : hw_state;
+
 	for (int i = 0; i < MAX_CONTACTS; i++) {
-		if (current[i].track != MT_ID_NULL) {
+		if (from_timer)
+			break;
+		if (hw_state[i].touch)
 			current_touches++;
-			if (active_slot < 0)
-				active_slot = i;
-		}
+		if (prev_state[i].touch)
+			prev_touches++;
 	}
 
-	int delay = prev_touches == 1 && current_touches == 0;
+	int delay = !from_timer && prev_touches == 1 && current_touches == 0;
+	if (delay)
+		memcpy(delayed_state, hw_state, sizeof(hw_state));
 
+	int j = 0;
+	static unsigned int id;
+	struct contact *ct;
 	for (int i = 0; i < MAX_CONTACTS; i++) {
-		if (current[i].in_report) {
-			report[j].type = EV_ABS;
-			report[j].code = ABS_MT_SLOT;
-			report[j++].value = i;
-			report[j].type = EV_ABS;
-			report[j].code = ABS_MT_TRACKING_ID;
-			report[j++].value = current[i].track;
-
-			if (current[i].track != MT_ID_NULL) {
-				report[j].type = EV_ABS;
-				report[j].code = ABS_MT_TOOL_TYPE;
-				report[j++].value = current[i].tool;
-
-				report[j].type = EV_ABS;
-				report[j].code = ABS_MT_POSITION_X;
-				report[j++].value = current[i].x;
-
-				report[j].type = EV_ABS;
-				report[j].code = ABS_MT_POSITION_Y;
-				report[j++].value = current[i].y;
-			}
-			if (delay)
-				slot_to_delay = i;
-			current[i].in_report = 0;
+		ct = &(state[i]);
+		if (!ct->in_report)
+			continue;
+		if (delay && !ct->touch) {
+			delayed_slot = i;
 		}
+
+		report[j].type = EV_ABS;
+		report[j].code = ABS_MT_SLOT;
+		report[j++].value = i;
+
+		if (delay && !ct->touch) {
+			id = tracking_ids[i];
+			current_touches = 1;
+		} else {
+			if (ct->touch && tracking_ids[i] == MT_ID_NULL)
+				tracking_ids[i] = last_tracking_id++ & MT_ID_MAX;
+			if (!ct->touch)
+				tracking_ids[i] = MT_ID_NULL;
+			id = tracking_ids[i];
+		}
+
+		report[j].type = EV_ABS;
+		report[j].code = ABS_MT_TRACKING_ID;
+		report[j++].value = id;
+
+		if (id != MT_ID_NULL) {
+			report[j].type = EV_ABS;
+			report[j].code = ABS_MT_TOOL_TYPE;
+			report[j++].value = ct->tool;
+
+			report[j].type = EV_ABS;
+			report[j].code = ABS_MT_POSITION_X;
+			report[j++].value = ct->x;
+
+			report[j].type = EV_ABS;
+			report[j].code = ABS_MT_POSITION_Y;
+			report[j++].value = ct->y;
+		}
+		ct->in_report = 0;
 	}
 
-	if (active_slot > -1 && (prev_active < 0 || prev_active == active_slot)) {
-		report[j].type = EV_ABS;
-		report[j].code = ABS_X;
-		report[j++].value = current[active_slot].x;
+	if (!from_timer) {
+		if (tracking_ids[abs_slot] != MT_ID_NULL) {
+			report[j].type = EV_ABS;
+			report[j].code = ABS_X;
+			report[j++].value = hw_state[abs_slot].x;
 
-		report[j].type = EV_ABS;
-		report[j].code = ABS_Y;
-		report[j++].value = current[active_slot].y;
+			report[j].type = EV_ABS;
+			report[j].code = ABS_Y;
+			report[j++].value = hw_state[abs_slot].y;
+		}
+		for (int i; i < MAX_CONTACTS; i++) {
+			if (tracking_ids[i] != MT_ID_NULL) {
+				abs_slot = i;
+				break;
+			}
+		}
 	}
 
 	report[j].type = EV_KEY;
@@ -157,29 +172,29 @@ void send_report(int vfd) {
 
 	report[j].type = EV_KEY;
 	report[j].code = BTN_LEFT;
-	report[j++].value = btn_left;
+	report[j++].value = !from_timer && btn_left;
 
 	report[j].type = EV_SYN;
 	report[j++].code = SYN_REPORT;
 
 	if (delay) {
-		delayed_slot = slot_to_delay;
-		delayed.len = j;
-		memcpy(delayed.events, report, sizeof(report[0]) * j);
 		ts.it_value.tv_nsec = DELAY_NS;
 		timer_settime(timer_id, 0, &ts, 0);
-		current[slot_to_delay].track = prev[slot_to_delay].track;
-		current_touches++;
-	} else {
-		pthread_mutex_lock(&mutex);
-		write(vfd, &report, sizeof(report[0]) * j);
-		pthread_mutex_unlock(&mutex);
 	}
 
-	prev_touches = current_touches;
-	prev_active = active_slot;
+	write(vfd, &report, sizeof(report[0]) * j);
 }
 
+void timer_thread (union sigval sig)
+{
+	pthread_mutex_lock(&mutex);
+	if (delayed_slot > -1) {
+		int vfd = *(int*)sig.sival_ptr;
+		send_report(vfd, 1);
+		delayed_slot = -1;
+	}
+	pthread_mutex_unlock(&mutex);
+}
 
 void do_capture(int fd, int vfd) {
 	unsigned char buf[12];
@@ -188,13 +203,11 @@ void do_capture(int fd, int vfd) {
 	int x;
 	int y;
 	int num_expected;
-	int num_reveived;
+	int num_received;
 	int tool;
 
-	delayed_slot = -1;
-	delayed.vfd = vfd;
 	se.sigev_notify = SIGEV_THREAD;
-	se.sigev_value.sival_ptr = &delayed;
+	se.sigev_value.sival_ptr = &vfd;
 	se.sigev_notify_function = timer_thread;
 	se.sigev_notify_attributes = NULL;
 
@@ -206,61 +219,62 @@ void do_capture(int fd, int vfd) {
 	timer_create(CLOCK_REALTIME, &se, &timer_id);
 
 	for (int i = 0; i < MAX_CONTACTS; i++) {
-		current[i].in_report = 0;
-		current[i].x = 0;
-		current[i].y = 0;
-		current[i].tool = MT_TOOL_FINGER;
-		current[i].track = MT_ID_NULL;
+		hw_state[i].in_report = 0;
+		hw_state[i].x = 0;
+		hw_state[i].y = 0;
+		hw_state[i].tool = MT_TOOL_FINGER;
+		hw_state[i].touch = 0;
 	}
 
-	memcpy(prev, current, sizeof(prev));
+	memcpy(prev_state, hw_state, sizeof(hw_state));
 
 	while(!stop) {
 		read(fd, buf, sizeof(buf));
 		// ignore 0x40 event
-		if (buf[0] == 0x04 && buf[1] != 0x40) {
-			int is_touch = (buf[1] & 0x0f) == 3;
-			int is_release = (buf[1] & 0x0f) == 1;
+		if (buf[0] != 0x04 || buf[1] == 0x40)
+			continue;
+		
+		int is_touch = (buf[1] & 0x0f) == 3;
+		int is_release = (buf[1] & 0x0f) == 1;
 
-			if (is_touch || is_release) {
-				slot = buf[1] >> 4;
-				current[slot].in_report = 1;
+		if (!is_touch && !is_release)
+			continue;
 
-				if (delayed_slot == 0 && slot == 0) {
-					delayed_slot = -1;
-					ts.it_value.tv_nsec = 0;
-					timer_settime(timer_id, 0, &ts, 0);
-				}
+		slot = buf[1] >> 4;
+		hw_state[slot].in_report = 1;
 
-				if (buf[8] > 0) {
-					num_reveived = 0;
-					num_expected = buf[8];
-				}
-				num_reveived++;
+		if (buf[8] > 0) {
+			num_received = 0;
+			num_expected = buf[8];
+		}
+		num_received++;
 
-				tool = buf[9] > 64 ? MT_TOOL_PALM : MT_TOOL_FINGER;
-				x = ((buf[3] & 0x0f) << 8) | buf[2];
-				y = ((buf[5] & 0x0f) << 8) | buf[4];
-				btn_left = buf[9] & 0x01;
-				// width = (buf[11] & 0x0f);
-				// height = (buf[11] >> 4);
-				// timestamp = (buf[7] << 8) + buf[6];
-				// ? = buf[10];
-				//
-				current[slot].x = x;
-				current[slot].y = y;
-				current[slot].tool = tool;
+		tool = buf[9] > 64 ? MT_TOOL_PALM : MT_TOOL_FINGER;
+		x = ((buf[3] & 0x0f) << 8) | buf[2];
+		y = ((buf[5] & 0x0f) << 8) | buf[4];
+		btn_left = buf[9] & 0x01;
+		// width = (buf[11] & 0x0f)
+		// height = (buf[11] >> 4)
+		// timestamp = (buf[7] << 8) + buf[6]
+		// ? = buf[10]
+		hw_state[slot].x = x;
+		hw_state[slot].y = y;
+		hw_state[slot].tool = tool;
+		hw_state[slot].touch = is_touch;
 
-				if (is_touch && current[slot].track == MT_ID_NULL)
-					current[slot].track = last_track++ & MT_ID_MAX;
-				if (is_release)
-					current[slot].track = MT_ID_NULL;
+		pthread_mutex_lock(&mutex);
+		if (slot == delayed_slot || num_expected > 1) {
+			delayed_slot = -1;
+			ts.it_value.tv_nsec = 0;
+			timer_settime(timer_id, 0, &ts, 0);
+		}
+		pthread_mutex_unlock(&mutex);
 
-				if (num_reveived == num_expected) {
-					send_report(vfd);
-					memcpy(prev, current, sizeof(current));
-				}
-			}
+		if (num_received == num_expected) {
+			pthread_mutex_lock(&mutex);
+			send_report(vfd, 0);
+			memcpy(prev_state, hw_state, sizeof(hw_state));
+			pthread_mutex_unlock(&mutex);
 		}
 	}
 }
@@ -317,6 +331,9 @@ static int create_virtual_device() {
 		case ABS_MT_TOOL_TYPE:
 			abssetup.absinfo.maximum = 2;
 			break;
+		case ABS_MT_TRACKING_ID:
+			abssetup.absinfo.maximum = MT_ID_MAX;
+			break;
 		}
 		ioctl(vfd, UI_ABS_SETUP, &abssetup);
 	}
@@ -332,6 +349,7 @@ static int create_virtual_device() {
 
 	return vfd;
 }
+
 
 static const char *direntcmp;
 static int startswith(const struct dirent *dir) {

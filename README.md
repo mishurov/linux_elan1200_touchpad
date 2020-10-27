@@ -48,7 +48,7 @@ Obviously it is limited to Xorg and Synaptics driver and since I've hacked into 
 #### Option two
 Use the userspace driver. It can work without hid-multitouch module. It takes raw HID data from a `/dev/hidraw*` device, creates a virtual `/dev/input/event*` device using the `uinput` module and reports input events according to the Linux Multi-touch (MT) Protocol Type B specification.
 ```sh
-gcc -o hid_elan1200 hid_elan1200.c -lrt
+gcc -o hid_elan1200 hid_elan1200.c -lrt -lpthread
 ```
 
 The directory also contains example Xorg configurations for Synaptics and Libinput drivers which ignore the real device and use the virtual device and a simpe systemd service file for autoload, optionally `hid-multitouch` module can be blacklisted.
