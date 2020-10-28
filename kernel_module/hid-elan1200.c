@@ -14,6 +14,9 @@ MODULE_LICENSE("GPL");
 #define USB_DEVICE_ID_ELAN1200_I2C_TOUCHPAD 0x3022
 #define MAX_TIMESTAMP_INTERVAL 1000000
 
+#define INPUT_MODE_TOUCHPAD 0x03
+#define LATENCY_MODE_NORMAL 0x00
+
 #define MT_ID_NULL	(-1)
 #define MT_ID_MIN	0
 #define MT_ID_MAX	65535
@@ -47,6 +50,13 @@ struct elan_application {
 	__s32 scantime_logical_max;
 };
 
+struct elan_features {
+	__s16 inputmode_report_id;
+	__s16 inputmode_index;
+	__s16 latency_report_id;
+	__s16 latency_index;
+};
+
 struct elan_usages {
 	__s32 *x, *y;
 	__s32 *contactid;
@@ -63,6 +73,7 @@ struct elan_device {
 	struct hid_device *hdev;
 	struct elan_usages usages;
 	struct elan_application app;
+	struct elan_features features;
 	spinlock_t lock;
 };
 
@@ -194,6 +205,8 @@ static void send_report(struct elan_device *td, bool fr_timer)
 	}
 
 	if (!fr_timer) {
+		if (delay)
+			app->abs_slot = app->delayed_slot;
 		if (app->tracking_ids[app->abs_slot] != MT_ID_NULL) {
 			input_event(input, EV_ABS, ABS_X, (state[app->abs_slot]).x);
 			input_event(input, EV_ABS, ABS_Y, (state[app->abs_slot]).y);
@@ -402,6 +415,49 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 }
 
 
+static void elan_feature_mapping(struct hid_device *hdev,
+		struct hid_field *field, struct hid_usage *usage)
+{
+	struct elan_device *td = hid_get_drvdata(hdev);
+
+	switch (usage->hid) {
+	case HID_DG_INPUTMODE:
+		if (td->features.inputmode_report_id < 0) {
+			td->features.inputmode_report_id = field->report->id;
+			td->features.inputmode_index = usage->usage_index;
+		}
+		break;
+	case HID_DG_LATENCYMODE:
+		td->features.latency_report_id = field->report->id;
+		td->features.latency_index = usage->usage_index;
+		break;
+	}
+}
+
+
+static void elan_set_modes(struct hid_device *hdev)
+{
+	struct elan_device *td = hid_get_drvdata(hdev);
+	struct hid_report *r;
+	struct hid_report_enum *re;
+
+	if (td->features.inputmode_report_id < 0 ||
+	    td->features.latency_report_id < 0)
+		return;
+	re = &(hdev->report_enum[HID_FEATURE_REPORT]);
+	r = re->report_id_hash[td->features.inputmode_report_id];
+	if (r) {
+		r->field[0]->value[td->features.inputmode_index] = INPUT_MODE_TOUCHPAD;
+		hid_hw_request(hdev, r, HID_REQ_SET_REPORT);
+	}
+	r = re->report_id_hash[td->features.latency_report_id];
+	if (r) {
+		r->field[0]->value[td->features.latency_index] = LATENCY_MODE_NORMAL;
+		hid_hw_request(hdev, r, HID_REQ_SET_REPORT);
+	}
+}
+
+
 static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	int ret;
@@ -417,6 +473,8 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	hid_set_drvdata(hdev, td);
 
 	init_app(&td->app);
+	td->features.inputmode_report_id = -1;
+	td->features.latency_report_id = -1;
 
 	timer_setup(&td->release_timer, elan_expired_timeout, 0);
 	spin_lock_init(&td->lock);
@@ -428,6 +486,8 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
 	if (ret)
 		return ret;
+
+	elan_set_modes(hdev);
 
 	return 0;
 }
@@ -452,6 +512,7 @@ static void elan_release_contacts(struct hid_device *hdev)
 static int elan_reset_resume(struct hid_device *hdev)
 {
 	elan_release_contacts(hdev);
+	elan_set_modes(hdev);
 	return 0;
 }
 
@@ -487,9 +548,10 @@ static struct hid_driver elan_driver = {
 	.id_table			= elan_devices,
 	.probe 				= elan_probe,
 	.remove				= elan_remove,
+	.feature_mapping		= elan_feature_mapping,
 	.input_mapping			= elan_input_mapping,
 	.input_mapped			= elan_input_mapped,
-	.input_configured 		= elan_input_configured,
+	.input_configured		= elan_input_configured,
 	.usage_table			= elan_grabbed_usages,
 	.event				= elan_event,
 	.report				= elan_report,

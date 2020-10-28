@@ -29,6 +29,11 @@
 #define RESOLUTION 31
 #define MAX_CONTACTS 5
 
+#define INPUT_MODE_REPORT_ID 0x3
+#define INPUT_MODE_TOUCHPAD 0x03
+#define LATENCY_MODE_REPORT_ID 0x7
+#define LATENCY_MODE_NORMAL 0x00
+
 #define MAX_EVENTS 64
 
 #define MT_ID_NULL	(-1)
@@ -240,7 +245,7 @@ void do_capture(int fd, int vfd) {
 	int rc;
 
 	while(!stop) {
-		if ((rc = read(fd, buf, sizeof(buf))) < 0) {
+		if ((rc = read(fd, buf, sizeof(buf))) < 0 && !stop) {
 			fprintf(stderr, "Error reading the hidraw device file.\n");
 			break;
 		}
@@ -424,11 +429,32 @@ static int get_src_device(const char *dir, const char *prefix) {
 	return fd;
 }
 
+static int set_features(int fd) {
+	int res;
+	unsigned char buf[2];
+	buf[0] = INPUT_MODE_REPORT_ID;
+	buf[1] = INPUT_MODE_TOUCHPAD;
+	res = ioctl(fd, HIDIOCSFEATURE(3), buf);
+	if (res < 0)
+		return res;
+	buf[0] = LATENCY_MODE_REPORT_ID;
+	buf[1] = LATENCY_MODE_NORMAL;
+	res = ioctl(fd, HIDIOCSFEATURE(3), buf);
+	if (res < 0)
+		return res;
+	return 0;
+}
 
 static int start_capture() {
 	int fd;
 	if ((fd = get_src_device("/dev", "hidraw")) < 0) {
 		perror("Unable to open hid device");
+		goto error;
+	}
+
+	int ret;
+	if ((ret = set_features(fd)) < 0) {
+		perror("HIDIOCSFEATURE");
 		goto error;
 	}
 
