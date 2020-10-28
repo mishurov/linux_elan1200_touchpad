@@ -59,7 +59,7 @@ static struct contact delayed_state[MAX_CONTACTS];
 
 // tracking ids
 static unsigned int last_tracking_id = MT_ID_MIN;
-static unsigned int tracking_ids[5] = { [0 ... 4] = MT_ID_NULL };
+static unsigned int tracking_ids[MAX_CONTACTS];
 
 // report data
 struct input_event report[MAX_EVENTS];
@@ -97,15 +97,14 @@ void send_report(int vfd, int from_timer) {
 		memcpy(delayed_state, hw_state, sizeof(hw_state));
 
 	int j = 0;
-	static unsigned int id;
+	unsigned int id;
 	struct contact *ct;
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
 		if (!ct->in_report)
 			continue;
-		if (delay && !ct->touch) {
+		if (delay && !ct->touch)
 			delayed_slot = i;
-		}
 
 		report[j].type = EV_ABS;
 		report[j].code = ABS_MT_SLOT;
@@ -139,6 +138,7 @@ void send_report(int vfd, int from_timer) {
 			report[j].code = ABS_MT_POSITION_Y;
 			report[j++].value = ct->y;
 		}
+
 		ct->in_report = 0;
 	}
 
@@ -151,18 +151,21 @@ void send_report(int vfd, int from_timer) {
 			report[j].type = EV_ABS;
 			report[j].code = ABS_Y;
 			report[j++].value = hw_state[abs_slot].y;
-		}
-		for (int i; i < MAX_CONTACTS; i++) {
-			if (tracking_ids[i] != MT_ID_NULL) {
-				abs_slot = i;
-				break;
+		} else {
+			for (int i = 0; i < MAX_CONTACTS; i++) {
+				if (tracking_ids[i] != MT_ID_NULL) {
+					abs_slot = i;
+					break;
+				}
 			}
 		}
+	} else {
+		abs_slot = 0;
 	}
 
 	report[j].type = EV_KEY;
 	report[j].code = BTN_TOUCH;
-	report[j++].value = current_touches >= 1;
+	report[j++].value = current_touches > 0;
 
 	for (int i = 0; i < 5; i++) {
 		report[j].type = EV_KEY;
@@ -170,11 +173,9 @@ void send_report(int vfd, int from_timer) {
 		report[j++].value = current_touches == i + 1;
 	}
 
-	if (!from_timer) {
-		report[j].type = EV_KEY;
-		report[j].code = BTN_LEFT;
-		report[j++].value = !from_timer && btn_left;
-	}
+	report[j].type = EV_KEY;
+	report[j].code = BTN_LEFT;
+	report[j++].value = !from_timer && btn_left;
 
 	report[j].type = EV_SYN;
 	report[j++].code = SYN_REPORT;
@@ -198,18 +199,9 @@ void timer_thread (union sigval sig)
 	pthread_mutex_unlock(&mutex);
 }
 
-void do_capture(int fd, int vfd) {
-	unsigned char buf[12];
-
-	int slot;
-	int x;
-	int y;
-	int num_expected;
-	int num_received;
-	int tool;
-
+void init_globals(int *vfd) {
 	se.sigev_notify = SIGEV_THREAD;
-	se.sigev_value.sival_ptr = &vfd;
+	se.sigev_value.sival_ptr = vfd;
 	se.sigev_notify_function = timer_thread;
 	se.sigev_notify_attributes = NULL;
 
@@ -226,12 +218,32 @@ void do_capture(int fd, int vfd) {
 		hw_state[i].y = 0;
 		hw_state[i].tool = MT_TOOL_FINGER;
 		hw_state[i].touch = 0;
+
+		tracking_ids[i] = MT_ID_NULL;
 	}
 
 	memcpy(prev_state, hw_state, sizeof(hw_state));
+}
+
+void do_capture(int fd, int vfd) {
+
+	init_globals(&vfd);
+
+	unsigned char buf[12];
+	int slot;
+	int x;
+	int y;
+	int num_expected;
+	int num_received;
+	int tool;
+
+	int rc;
 
 	while(!stop) {
-		read(fd, buf, sizeof(buf));
+		if ((rc = read(fd, buf, sizeof(buf))) < 0) {
+			fprintf(stderr, "Error reading the hidraw device file.\n");
+			break;
+		}
 		// ignore 0x40 event
 		if (buf[0] != 0x04 || buf[1] == 0x40)
 			continue;
@@ -430,14 +442,10 @@ static int start_capture() {
 	sigaction(SIGINT, &int_action, 0);
 	sigaction(SIGTERM, &int_action, 0);
 
-	ioctl(fd, EVIOCGRAB, (void*)1);
-
 	do_capture(fd, vfd);
 
 	ioctl(vfd, UI_DEV_DESTROY);
 	close(vfd);
-
-	ioctl(fd, EVIOCGRAB, (void*)0);
 	close(fd);
 	return 0;
 error:

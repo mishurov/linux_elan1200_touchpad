@@ -14,6 +14,10 @@ MODULE_LICENSE("GPL");
 #define USB_DEVICE_ID_ELAN1200_I2C_TOUCHPAD 0x3022
 #define MAX_TIMESTAMP_INTERVAL 1000000
 
+#define MT_ID_NULL	(-1)
+#define MT_ID_MIN	0
+#define MT_ID_MAX	65535
+
 struct contact {
 	bool in_report;
 	__s32 x;
@@ -29,9 +33,13 @@ struct elan_application {
 
 	bool left_button_state;
 	int delayed_slot;
+	int abs_slot;
 	__s32 num_expected;
 	__s32 num_received;
 	
+	unsigned int last_tracking_id;
+	unsigned int tracking_ids[MAX_CONTACTS];
+
 	__s32 dev_time;
 	unsigned long jiffies;
 	int timestamp;
@@ -63,9 +71,10 @@ static void init_app(struct elan_application *app) {
 	app->timestamp = 0;
 	app->jiffies = 0;
 	app->prev_scantime = 0;
-
 	app->left_button_state = 0;
 	app->delayed_slot = -1;
+	app->abs_slot = 0;
+	app->last_tracking_id = MT_ID_MIN;
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		struct contact* hw = &app->hw_state[i];
 		struct contact* pr = &app->prev_state[i];
@@ -74,6 +83,7 @@ static void init_app(struct elan_application *app) {
 		hw->x = hw->y = pr->x = pr->y = de->x = de->y = 0;
 		hw->tool = pr->tool = de->tool = 0;
 		hw->touch = pr->touch = de->touch = 0;
+		app->tracking_ids[i] = MT_ID_NULL;
 	}
 }
 
@@ -129,8 +139,8 @@ static void send_report(struct elan_device *td, bool fr_timer)
 	struct input_dev *input = td->input;
 
 	int i;
+	unsigned int id;
 	bool delay = 0;
-	bool touch;
 	int tool = MT_TOOL_FINGER;
 	int current_touches = 0;
 	int prev_touches = 0;
@@ -156,28 +166,56 @@ static void send_report(struct elan_device *td, bool fr_timer)
 			continue;
 		if (!ct->tool)
 			tool = MT_TOOL_PALM;
-
-		touch = ct->touch;
-		if (delay && !ct->touch) {
+		if (delay && !ct->touch)
 			app->delayed_slot = i;
-			current_touches = 1;
-			touch = 1;
-		}
 
 		input_mt_slot(input, i);
-		input_mt_report_slot_state(input, tool, touch);
-		if (touch) {
+
+		if (delay && !ct->touch) {
+			id = app->tracking_ids[i];
+			current_touches = 1;
+		} else {
+			if (ct->touch && app->tracking_ids[i] == MT_ID_NULL)
+				app->tracking_ids[i] = app->last_tracking_id++ & MT_ID_MAX;
+			if (!ct->touch)
+				app->tracking_ids[i] = MT_ID_NULL;
+			id = app->tracking_ids[i];
+		}
+
+		input_event(input, EV_ABS, ABS_MT_TRACKING_ID, id);
+
+		if (id != MT_ID_NULL) {
+			input_event(input, EV_ABS, ABS_MT_TOOL_TYPE, tool);
 			input_event(input, EV_ABS, ABS_MT_POSITION_X, ct->x);
 			input_event(input, EV_ABS, ABS_MT_POSITION_Y, ct->y);
 		}
+
 		ct->in_report = 0;
 	}
 
-	if (!fr_timer)
+	if (!fr_timer) {
+		if (app->tracking_ids[app->abs_slot] != MT_ID_NULL) {
+			input_event(input, EV_ABS, ABS_X, (state[app->abs_slot]).x);
+			input_event(input, EV_ABS, ABS_Y, (state[app->abs_slot]).y);
+		} else {
+			for (i = 0; i < MAX_CONTACTS; i++) {
+				if (app->tracking_ids[i] != MT_ID_NULL) {
+					app->abs_slot = i;
+					break;
+				}
+			}
+		}
+	} else {
+		app->abs_slot = 0;
+	}
+
+	input_event(input, EV_KEY, BTN_TOUCH, current_touches > 0);
+	input_mt_report_finger_count(input, current_touches);
+
+	if (!fr_timer) {
 		input_event(input, EV_KEY, BTN_LEFT, app->left_button_state);
-	input_mt_sync_frame(input);
-	if (!fr_timer)
 		input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
+	}
 
 	if (delay) {
 		mod_timer(&td->release_timer,

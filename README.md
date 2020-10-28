@@ -88,6 +88,7 @@ References:
 - https://github.com/torvalds/linux/blob/master/samples/hidraw/hid-example.c
 - https://github.com/redmcg/FTE1001/blob/master/main.c
 - https://github.com/torvalds/linux/blob/master/drivers/hid/hid-multitouch.c
+- https://github.com/torvalds/linux/blob/master/drivers/input/input-mt.c
 - http://bitmath.org/code/mtdev/
 
 
