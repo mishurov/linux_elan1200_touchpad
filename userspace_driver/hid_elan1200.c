@@ -170,9 +170,11 @@ void send_report(int vfd, int from_timer) {
 		report[j++].value = current_touches == i + 1;
 	}
 
-	report[j].type = EV_KEY;
-	report[j].code = BTN_LEFT;
-	report[j++].value = !from_timer && btn_left;
+	if (!from_timer) {
+		report[j].type = EV_KEY;
+		report[j].code = BTN_LEFT;
+		report[j++].value = !from_timer && btn_left;
+	}
 
 	report[j].type = EV_SYN;
 	report[j++].code = SYN_REPORT;
@@ -263,7 +265,8 @@ void do_capture(int fd, int vfd) {
 		hw_state[slot].touch = is_touch;
 
 		pthread_mutex_lock(&mutex);
-		if (slot == delayed_slot || num_expected > 1) {
+		if (delayed_slot > -1 &&
+		    (slot == delayed_slot || num_expected > 1)) {
 			delayed_slot = -1;
 			ts.it_value.tv_nsec = 0;
 			timer_settime(timer_id, 0, &ts, 0);
