@@ -7,7 +7,17 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 MODULE_LICENSE("GPL");
 
 
-#define RELEASE_TIMEOUT 25
+#define DELAY 18
+#define DELAY_NS DELAY * 1000000
+
+//#define MEASURE_TIME
+#ifdef MEASURE_TIME
+static unsigned long start_j, stop_j;
+static unsigned int delta_ms(void) {
+	return jiffies_to_msecs(stop_j - start_j);
+}
+#endif
+
 #define MAX_CONTACTS 5
 
 #define USB_VENDOR_ID_ELANTECH 0x04f3
@@ -36,7 +46,6 @@ struct elan_application {
 
 	bool left_button_state;
 	int delayed_slot;
-	int abs_slot;
 	__s32 num_expected;
 	__s32 num_received;
 	
@@ -84,7 +93,6 @@ static void init_app(struct elan_application *app) {
 	app->prev_scantime = 0;
 	app->left_button_state = 0;
 	app->delayed_slot = -1;
-	app->abs_slot = 0;
 	app->last_tracking_id = MT_ID_MIN;
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		struct contact* hw = &app->hw_state[i];
@@ -150,90 +158,94 @@ static void send_report(struct elan_device *td, bool fr_timer)
 	struct input_dev *input = td->input;
 
 	int i;
+	int oldest_slot;
+	int old_id;
+	int current_id;
 	unsigned int id;
-	bool delay = 0;
 	int tool = MT_TOOL_FINGER;
 	int current_touches = 0;
 	int prev_touches = 0;
+	int num_reported = 0;
+	int slot_to_delay = 0;
 	struct contact *ct;
 	struct contact *state = fr_timer ? app->delayed_state : app->hw_state;
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		if (fr_timer)
 			break;
+		if (app->hw_state[i].in_report) {
+			num_reported++;
+			if (!app->hw_state[i].touch)
+				slot_to_delay = i;
+		}
 		if (app->hw_state[i].touch)
 			current_touches++;
 		if (app->prev_state[i].touch)
 			prev_touches++;
 	}
 
-	delay = !fr_timer && prev_touches == 1 && current_touches == 0;
-	if (delay)
+	if (!fr_timer && prev_touches == 1 && current_touches == 0) {
 		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
+		app->delayed_slot = slot_to_delay;
+		mod_timer(&td->release_timer,
+			jiffies + nsecs_to_jiffies(DELAY_NS));
+#ifdef MEASURE_TIME
+		printk("Timer started\n");
+		start_j = jiffies;
+#endif
+		return;
+	}
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
 		if (!ct->in_report)
 			continue;
-		if (!ct->tool)
-			tool = MT_TOOL_PALM;
-		if (delay && !ct->touch)
-			app->delayed_slot = i;
-
 		input_mt_slot(input, i);
 
-		if (delay && !ct->touch) {
-			id = app->tracking_ids[i];
-			current_touches = 1;
-		} else {
-			if (ct->touch && app->tracking_ids[i] == MT_ID_NULL)
-				app->tracking_ids[i] = app->last_tracking_id++ & MT_ID_MAX;
-			if (!ct->touch)
-				app->tracking_ids[i] = MT_ID_NULL;
-			id = app->tracking_ids[i];
-		}
+		if (ct->touch && app->tracking_ids[i] == MT_ID_NULL)
+			app->tracking_ids[i] = app->last_tracking_id++ % MT_ID_MAX;
+		if (!ct->touch)
+			app->tracking_ids[i] = MT_ID_NULL;
+		id = app->tracking_ids[i];
 
 		input_event(input, EV_ABS, ABS_MT_TRACKING_ID, id);
 
 		if (id != MT_ID_NULL) {
+			if (!ct->tool)
+				tool = MT_TOOL_PALM;
 			input_event(input, EV_ABS, ABS_MT_TOOL_TYPE, tool);
 			input_event(input, EV_ABS, ABS_MT_POSITION_X, ct->x);
 			input_event(input, EV_ABS, ABS_MT_POSITION_Y, ct->y);
 		}
 
-		ct->in_report = 0;
+		app->hw_state[i].in_report = 0;
 	}
 
-	if (!fr_timer) {
-		if (delay)
-			app->abs_slot = app->delayed_slot;
-		if (app->tracking_ids[app->abs_slot] != MT_ID_NULL) {
-			input_event(input, EV_ABS, ABS_X, (state[app->abs_slot]).x);
-			input_event(input, EV_ABS, ABS_Y, (state[app->abs_slot]).y);
-		} else {
-			for (i = 0; i < MAX_CONTACTS; i++) {
-				if (app->tracking_ids[i] != MT_ID_NULL) {
-					app->abs_slot = i;
-					break;
-				}
+	if (!fr_timer && current_touches > 0) {
+		oldest_slot = 0;
+		old_id = app->last_tracking_id % MT_ID_MAX + 1;
+		for (i = 0; i < MAX_CONTACTS; i++) {
+			if (app->tracking_ids[i] == MT_ID_NULL)
+				continue;
+			current_id = app->tracking_ids[i];
+			if (current_id < old_id) {
+				oldest_slot = i;
+				old_id = current_id;
 			}
 		}
-	} else {
-		app->abs_slot = 0;
+		if (app->tracking_ids[oldest_slot] != MT_ID_NULL) {
+			input_event(input, EV_ABS, ABS_X, (state[oldest_slot]).x);
+			input_event(input, EV_ABS, ABS_Y, (state[oldest_slot]).y);
+		}
 	}
 
 	input_event(input, EV_KEY, BTN_TOUCH, current_touches > 0);
 	input_mt_report_finger_count(input, current_touches);
 
-	if (!fr_timer) {
-		input_event(input, EV_KEY, BTN_LEFT, app->left_button_state);
-		input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
-	}
+	input_event(input, EV_KEY, BTN_LEFT, app->left_button_state);
 
-	if (delay) {
-		mod_timer(&td->release_timer,
-			jiffies + msecs_to_jiffies(RELEASE_TIMEOUT));
-	}
+	if (!fr_timer)
+		input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
 
 	input_sync(input);
 }
@@ -243,6 +255,10 @@ static void elan_expired_timeout(struct timer_list *t)
 {
 	struct elan_device *td = from_timer(td, t, release_timer);
 	spin_lock(&td->lock);
+#ifdef MEASURE_TIME
+	stop_j = jiffies;
+	printk("Timer triggered: %u ms\n", delta_ms());
+#endif
 	if (td->app.delayed_slot > -1) {
 		send_report(td, 1);
 		td->app.delayed_slot = -1;
@@ -276,10 +292,13 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 	slot = *td->usages.slot;
 
 	spin_lock_bh(&td->lock);
-	if (app->delayed_slot > -1 &&
-	    (slot == app->delayed_slot || app->num_expected > 1)) {
+	if (app->delayed_slot > -1) {
 		app->delayed_slot = -1;
 		del_timer(&td->release_timer);
+#ifdef MEASURE_TIME
+		stop_j = jiffies;
+		printk("Next event arrived: %u ms\n", delta_ms());
+#endif
 	}
 	spin_unlock_bh(&td->lock);
 
@@ -495,6 +514,7 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 static void elan_release_contacts(struct hid_device *hdev)
 {
 	struct elan_device *td = hid_get_drvdata(hdev);
+	struct elan_application *app = &td->app;
 	struct input_dev *input = td->input;
 	int i;
 
@@ -502,6 +522,9 @@ static void elan_release_contacts(struct hid_device *hdev)
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		input_mt_slot(input, i);
 		input_mt_report_slot_inactive(input);
+		app->tracking_ids[i] = MT_ID_NULL;
+		app->hw_state[i].touch = 0;
+		app->hw_state[i].in_report = 0;
 	}
 	input_mt_sync_frame(input);
 	input_sync(input);

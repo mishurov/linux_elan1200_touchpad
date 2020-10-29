@@ -50,6 +50,7 @@ Use the userspace driver. It can work without hid-multitouch module. It takes ra
 ```sh
 gcc -o hid_elan1200 hid_elan1200.c -lrt -lpthread
 ```
+Possibly delay time should be adjusted adding `-DMEASURE_TIME` flag to gcc will print relevant time, when moving fingers close to each other and appart without lifting.
 
 The directory also contains example Xorg configurations for Synaptics and Libinput drivers which ignore the real device and use the virtual device and a simpe systemd service file for autoload, optionally `hid-multitouch` module can be blacklisted.
 ```sh
@@ -62,7 +63,7 @@ sudo systemctl enable elan1200.service
 The `mirror_elan1200.c` in the directory just mirrors input events from the input device created by hid-multitouch without any modifications. It's my previous attempt to filter hardware reports in userspace.
 
 #### Option three
-The kernel module (No longer supported, the last tested kernel version: 4.17). Since the kernel API changes very fast, I can't do relevant updates because I don't use it. The solution would be conventional but it is buggy: some releases aren't triggered and so on. May be it is because of the incorrect assignment of tracking ids, or timer functionality. I don't know.
+Use the kernel module. Since `timer_list` works weirdly in kernel or (most probably) I use timers incorrectly, I don't use the module because of its bugginness and update the module irregularly, the latest kernel I tested it with is 5.8.
 
 The installation is typical as for any module installation. Then blacklist `hid-multitouch`.
 

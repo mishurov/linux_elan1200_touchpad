@@ -21,8 +21,16 @@
 
 // on my machine 14 ms is minimum, otherwise
 // the timer fires earlier than the next event arrives
-#define DELAY 25
+#define DELAY 16
 #define DELAY_NS DELAY * 1000000
+
+// gcc -o hid_elan1200 hid_elan1200.c -lrt -lpthread -DMEASURE_TIME
+#ifdef MEASURE_TIME
+struct timespec start_ts, stop_ts;
+unsigned long delta_ms() {
+	return (stop_ts.tv_nsec - start_ts.tv_nsec) / 1000000;
+}
+#endif
 
 #define MAX_X 3200
 #define MAX_Y 2198
@@ -81,56 +89,61 @@ static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
 static int delayed_slot = -1;
-static int abs_slot = 0;
 
 void send_report(int vfd, int from_timer) {
 	int current_touches = 0;
+	int slot_to_delay = 0;
 	int prev_touches = 0;
+	int num_reported = 0;
 	struct contact *state = from_timer ? delayed_state : hw_state;
 
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		if (from_timer)
 			break;
+		if (hw_state[i].in_report) {
+			num_reported++;
+			if (!hw_state[i].touch)
+				slot_to_delay = i;
+		}
 		if (hw_state[i].touch)
 			current_touches++;
 		if (prev_state[i].touch)
 			prev_touches++;
 	}
 
-	int delay = !from_timer && prev_touches == 1 && current_touches == 0;
-	if (delay)
+	if (!from_timer && prev_touches == 1 && current_touches == 0) {
 		memcpy(delayed_state, hw_state, sizeof(hw_state));
+		delayed_slot = slot_to_delay;
+		ts.it_value.tv_nsec = DELAY_NS;
+		timer_settime(timer_id, 0, &ts, 0);
+#ifdef MEASURE_TIME
+		printf("Timer started\n");
+		clock_gettime(CLOCK_MONOTONIC_RAW, &start_ts);
+#endif
+		return;
+	}
 
 	int j = 0;
-	unsigned int id;
 	struct contact *ct;
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
 		if (!ct->in_report)
 			continue;
-		if (delay && !ct->touch)
-			delayed_slot = i;
 
 		report[j].type = EV_ABS;
 		report[j].code = ABS_MT_SLOT;
 		report[j++].value = i;
 
-		if (delay && !ct->touch) {
-			id = tracking_ids[i];
-			current_touches = 1;
-		} else {
-			if (ct->touch && tracking_ids[i] == MT_ID_NULL)
-				tracking_ids[i] = last_tracking_id++ & MT_ID_MAX;
-			if (!ct->touch)
-				tracking_ids[i] = MT_ID_NULL;
-			id = tracking_ids[i];
-		}
+		if (ct->touch && tracking_ids[i] == MT_ID_NULL)
+			tracking_ids[i] = last_tracking_id++ % MT_ID_MAX;
+		if (!ct->touch)
+			tracking_ids[i] = MT_ID_NULL;
 
 		report[j].type = EV_ABS;
 		report[j].code = ABS_MT_TRACKING_ID;
-		report[j++].value = id;
+		report[j++].value = tracking_ids[i];
 
-		if (id != MT_ID_NULL) {
+		if (tracking_ids[i] != MT_ID_NULL) {
 			report[j].type = EV_ABS;
 			report[j].code = ABS_MT_TOOL_TYPE;
 			report[j++].value = ct->tool;
@@ -144,28 +157,31 @@ void send_report(int vfd, int from_timer) {
 			report[j++].value = ct->y;
 		}
 
-		ct->in_report = 0;
+		hw_state[i].in_report = 0;
 	}
 
-	if (!from_timer) {
-		if (tracking_ids[abs_slot] != MT_ID_NULL) {
+	if (!from_timer && current_touches > 0) {
+		int current_id;
+		int oldest_slot = 0;
+		int old_id = last_tracking_id % MT_ID_MAX + 1;
+		for (int i = 0; i < MAX_CONTACTS; i++) {
+			if (tracking_ids[i] == MT_ID_NULL)
+				continue;
+			current_id = tracking_ids[i];
+			if (current_id < old_id) {
+				oldest_slot = i;
+				old_id = current_id;
+			}
+		}
+		if (tracking_ids[oldest_slot] != MT_ID_NULL) {
 			report[j].type = EV_ABS;
 			report[j].code = ABS_X;
-			report[j++].value = hw_state[abs_slot].x;
+			report[j++].value = hw_state[oldest_slot].x;
 
 			report[j].type = EV_ABS;
 			report[j].code = ABS_Y;
-			report[j++].value = hw_state[abs_slot].y;
-		} else {
-			for (int i = 0; i < MAX_CONTACTS; i++) {
-				if (tracking_ids[i] != MT_ID_NULL) {
-					abs_slot = i;
-					break;
-				}
-			}
+			report[j++].value = hw_state[oldest_slot].y;
 		}
-	} else {
-		abs_slot = 0;
 	}
 
 	report[j].type = EV_KEY;
@@ -185,11 +201,6 @@ void send_report(int vfd, int from_timer) {
 	report[j].type = EV_SYN;
 	report[j++].code = SYN_REPORT;
 
-	if (delay) {
-		ts.it_value.tv_nsec = DELAY_NS;
-		timer_settime(timer_id, 0, &ts, 0);
-	}
-
 	write(vfd, &report, sizeof(report[0]) * j);
 }
 
@@ -201,6 +212,10 @@ void timer_thread (union sigval sig)
 		send_report(vfd, 1);
 		delayed_slot = -1;
 	}
+#ifdef MEASURE_TIME
+	clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
+	printf("Timer triggered: %lu ms\n", delta_ms());
+#endif
 	pthread_mutex_unlock(&mutex);
 }
 
@@ -282,11 +297,14 @@ void do_capture(int fd, int vfd) {
 		hw_state[slot].touch = is_touch;
 
 		pthread_mutex_lock(&mutex);
-		if (delayed_slot > -1 &&
-		    (slot == delayed_slot || num_expected > 1)) {
+		if (delayed_slot > -1) {
 			delayed_slot = -1;
 			ts.it_value.tv_nsec = 0;
 			timer_settime(timer_id, 0, &ts, 0);
+#ifdef MEASURE_TIME
+			clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
+			printf("Next event arrived: %lu ms\n", delta_ms());
+#endif
 		}
 		pthread_mutex_unlock(&mutex);
 
