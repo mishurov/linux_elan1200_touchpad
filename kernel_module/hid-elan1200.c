@@ -10,7 +10,6 @@ MODULE_LICENSE("GPL");
 #define DELAY 16
 #define DELAY_NS DELAY * 1000000
 
-//#define MEASURE_TIME
 #ifdef MEASURE_TIME
 static unsigned long start_j, stop_j;
 
@@ -19,6 +18,8 @@ j_delta_msec(unsigned long *a, unsigned long *b) {
 	return jiffies_to_msecs(*a - *b);
 }
 #endif
+
+#define INPUT_DEV_NAME "FilteredELAN1200"
 
 #define MAX_CONTACTS 5
 
@@ -50,7 +51,7 @@ struct elan_application {
 	bool left_button_state;
 	__s32 num_expected;
 	__s32 num_received;
-	
+
 	unsigned int last_tracking_id;
 	unsigned int tracking_ids[MAX_CONTACTS];
 
@@ -88,7 +89,8 @@ struct elan_device {
 	struct elan_features features;
 };
 
-static void init_app(struct elan_application *app) {
+
+static void init_app_vars(struct elan_application *app) {
 	int i;
 
 	app->timestamp = 0;
@@ -110,6 +112,7 @@ static void init_app(struct elan_application *app) {
 	}
 }
 
+
 static int compute_timestamp(struct elan_application *app, __s32 value)
 {
 	long delta = value - app->prev_scantime;
@@ -127,6 +130,7 @@ static int compute_timestamp(struct elan_application *app, __s32 value)
 	else
 		return app->timestamp + delta;
 }
+
 
 static void check_button_state(struct hid_device *hdev, struct hid_report *report,
 				struct elan_application* app) {
@@ -265,7 +269,7 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 	struct elan_application *app = &td->app;
 
 	struct contact *ct;
-	
+
 	if (!(hdev->claimed & HID_CLAIMED_INPUT))
 		return;
 
@@ -429,12 +433,20 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 {
 	int ret;
 	struct input_dev *input = hi->input;
+	char *name;
 
 	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
 
 	ret = input_mt_init_slots(input, MAX_CONTACTS, INPUT_MT_POINTER);
 	if (ret)
 		return ret;
+
+	name = devm_kzalloc(&hi->input->dev, strlen(INPUT_DEV_NAME) + 2, GFP_KERNEL);
+	if (name) {
+		sprintf(name, INPUT_DEV_NAME);
+		hi->input->name = name;
+	}
+
 	return 0;
 }
 
@@ -496,7 +508,7 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	td->hdev = hdev;
 	hid_set_drvdata(hdev, td);
 
-	init_app(&td->app);
+	init_app_vars(&td->app);
 	td->features.inputmode_report_id = -1;
 	td->features.latency_report_id = -1;
 
@@ -515,6 +527,7 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	return 0;
 }
+
 
 static void elan_release_contacts(struct hid_device *hdev)
 {
@@ -536,6 +549,7 @@ static void elan_release_contacts(struct hid_device *hdev)
 	spin_unlock_bh(&td->lock);
 }
 
+
 #ifdef CONFIG_PM
 static int elan_reset_resume(struct hid_device *hdev)
 {
@@ -551,12 +565,14 @@ static int elan_resume(struct hid_device *hdev)
 }
 #endif
 
+
 static void elan_remove(struct hid_device *hdev)
 {
 	struct elan_device *td = hid_get_drvdata(hdev);
 	del_timer_sync(&td->timer);
 	hid_hw_stop(hdev);
 }
+
 
 static const struct hid_device_id elan_devices[] = {
 	{ HID_I2C_DEVICE(USB_VENDOR_ID_ELANTECH,
