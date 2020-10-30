@@ -1,4 +1,4 @@
-// gcc -o hid_elan1200 hid_elan1200.c -lrt -lpthread
+// gcc -o hid_elan1200 hid_elan1200.c -lrt
 
 #define _GNU_SOURCE
 
@@ -9,26 +9,37 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdio.h>
-#include <pthread.h>
 #include <stdlib.h>
-#include <limits.h>
+#include <pthread.h>
 #include <linux/hidraw.h>
 #include <linux/uinput.h>
 
 
 #define VIRTUAL_DEV_NAME "VirtualELAN1200"
+#define VIRT_VID 0x04F3
+#define VIRT_PID 0x3022
 #define ELAN_NAME "ELAN1200:00 04F3:3022"
 
 // on my machine 14 ms is minimum, otherwise
-// the timer fires earlier than the next event arrives
-#define DELAY 16
+// the delayed state is reported earlier than the next event arrives
+#define DELAY 15
 #define DELAY_NS DELAY * 1000000
 
-// gcc -o hid_elan1200 hid_elan1200.c -lrt -lpthread -DMEASURE_TIME
+// gcc -o hid_elan1200 hid_elan1200.c -lrt -DMEASURE_TIME
 #ifdef MEASURE_TIME
-struct timespec start_ts, stop_ts;
-unsigned long delta_ms() {
-	return (stop_ts.tv_nsec - start_ts.tv_nsec) / 1000000;
+static struct timespec start_ts, stop_ts;
+
+static inline long
+ts_delta_msec(const struct timespec *a, const struct timespec *b)
+{
+	struct timespec r;
+	r.tv_sec = a->tv_sec - b->tv_sec;
+	r.tv_nsec = a->tv_nsec - b->tv_nsec;
+	if (r.tv_nsec < 0) {
+		r.tv_sec--;
+		r.tv_nsec += 1000000000;
+	}
+	return (long)r.tv_sec * 1000 + r.tv_nsec / 1000000;
 }
 #endif
 
@@ -59,27 +70,34 @@ static void interrupt_handler(int sig)
 // state
 struct contact {
 	int in_report;
-	int x;
-	int y;
+	int x, y;
 	int tool;
 	int touch;
 };
 
-static int btn_left = 0;
-static struct contact hw_state[MAX_CONTACTS];
-static struct contact prev_state[MAX_CONTACTS];
-static struct contact delayed_state[MAX_CONTACTS];
+struct elan_usages {
+	int x, y;
+	int tool;
+	int touch;
+	int slot;
+	int num_contacts;
+};
 
-// tracking ids
-static unsigned int last_tracking_id = MT_ID_MIN;
-static unsigned int tracking_ids[MAX_CONTACTS];
+struct elan_application {
+	int vfd;
 
-// report data
-struct input_event report[MAX_EVENTS];
+	struct contact hw_state[MAX_CONTACTS];
+	struct contact delayed_state[MAX_CONTACTS];
 
-// buttons
-int btn_tools[5] = { BTN_TOOL_FINGER, BTN_TOOL_DOUBLETAP, BTN_TOOL_TRIPLETAP,
-			BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP };
+	int left_button_state;
+	int num_expected;
+	int num_received;
+	
+	int delayed;
+
+	unsigned int last_tracking_id;
+	unsigned int tracking_ids[MAX_CONTACTS];
+};
 
 // timer
 static timer_t timer_id;
@@ -87,46 +105,26 @@ static struct itimerspec ts;
 static struct sigevent se;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// report data
+static struct input_event report[MAX_EVENTS];
 
-static int delayed_slot = -1;
+// buttons
+static int btn_tools[5] = { BTN_TOOL_FINGER, BTN_TOOL_DOUBLETAP, BTN_TOOL_TRIPLETAP,
+			BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP };
 
-void send_report(int vfd, int from_timer) {
-	int current_touches = 0;
-	int slot_to_delay = 0;
-	int prev_touches = 0;
-	int num_reported = 0;
-	struct contact *state = from_timer ? delayed_state : hw_state;
 
-	for (int i = 0; i < MAX_CONTACTS; i++) {
-		if (from_timer)
-			break;
-		if (hw_state[i].in_report) {
-			num_reported++;
-			if (!hw_state[i].touch)
-				slot_to_delay = i;
-		}
-		if (hw_state[i].touch)
-			current_touches++;
-		if (prev_state[i].touch)
-			prev_touches++;
-	}
-
-	if (!from_timer && prev_touches == 1 && current_touches == 0) {
-		memcpy(delayed_state, hw_state, sizeof(hw_state));
-		delayed_slot = slot_to_delay;
-		ts.it_value.tv_nsec = DELAY_NS;
-		timer_settime(timer_id, 0, &ts, 0);
-#ifdef MEASURE_TIME
-		printf("Timer started\n");
-		clock_gettime(CLOCK_MONOTONIC_RAW, &start_ts);
-#endif
-		return;
-	}
-
+static void send_report(struct elan_application *app, int delayed) {
 	int j = 0;
 	struct contact *ct;
+	int current_touches = 0;
+	int tool = MT_TOOL_FINGER;
+
+	struct contact *state = delayed ? app->delayed_state : app->hw_state;
+
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
+		if (ct->touch)
+			current_touches++;
 		if (!ct->in_report)
 			continue;
 
@@ -134,19 +132,21 @@ void send_report(int vfd, int from_timer) {
 		report[j].code = ABS_MT_SLOT;
 		report[j++].value = i;
 
-		if (ct->touch && tracking_ids[i] == MT_ID_NULL)
-			tracking_ids[i] = last_tracking_id++ % MT_ID_MAX;
+		if (ct->touch && app->tracking_ids[i] == MT_ID_NULL)
+			app->tracking_ids[i] = app->last_tracking_id++ % MT_ID_MAX;
 		if (!ct->touch)
-			tracking_ids[i] = MT_ID_NULL;
+			app->tracking_ids[i] = MT_ID_NULL;
 
 		report[j].type = EV_ABS;
 		report[j].code = ABS_MT_TRACKING_ID;
-		report[j++].value = tracking_ids[i];
+		report[j++].value = app->tracking_ids[i];
 
-		if (tracking_ids[i] != MT_ID_NULL) {
+		if (app->tracking_ids[i] != MT_ID_NULL) {
+			if (!ct->tool)
+				tool = MT_TOOL_PALM;
 			report[j].type = EV_ABS;
 			report[j].code = ABS_MT_TOOL_TYPE;
-			report[j++].value = ct->tool;
+			report[j++].value = tool;
 
 			report[j].type = EV_ABS;
 			report[j].code = ABS_MT_POSITION_X;
@@ -157,30 +157,30 @@ void send_report(int vfd, int from_timer) {
 			report[j++].value = ct->y;
 		}
 
-		hw_state[i].in_report = 0;
+		app->hw_state[i].in_report = 0;
 	}
 
-	if (!from_timer && current_touches > 0) {
+	if (current_touches > 0) {
 		int current_id;
 		int oldest_slot = 0;
-		int old_id = last_tracking_id % MT_ID_MAX + 1;
+		int old_id = app->last_tracking_id % MT_ID_MAX + 1;
 		for (int i = 0; i < MAX_CONTACTS; i++) {
-			if (tracking_ids[i] == MT_ID_NULL)
+			if (app->tracking_ids[i] == MT_ID_NULL)
 				continue;
-			current_id = tracking_ids[i];
+			current_id = app->tracking_ids[i];
 			if (current_id < old_id) {
 				oldest_slot = i;
 				old_id = current_id;
 			}
 		}
-		if (tracking_ids[oldest_slot] != MT_ID_NULL) {
+		if (app->tracking_ids[oldest_slot] != MT_ID_NULL) {
 			report[j].type = EV_ABS;
 			report[j].code = ABS_X;
-			report[j++].value = hw_state[oldest_slot].x;
+			report[j++].value = (state[oldest_slot]).x;
 
 			report[j].type = EV_ABS;
 			report[j].code = ABS_Y;
-			report[j++].value = hw_state[oldest_slot].y;
+			report[j++].value = (state[oldest_slot]).y;
 		}
 	}
 
@@ -196,32 +196,50 @@ void send_report(int vfd, int from_timer) {
 
 	report[j].type = EV_KEY;
 	report[j].code = BTN_LEFT;
-	report[j++].value = !from_timer && btn_left;
+	report[j++].value = app->left_button_state;
 
 	report[j].type = EV_SYN;
 	report[j++].code = SYN_REPORT;
 
-	write(vfd, &report, sizeof(report[0]) * j);
+	write(app->vfd, &report, sizeof(report[0]) * j);
 }
 
-void timer_thread (union sigval sig)
+
+void timer_thread(union sigval sig)
 {
 	pthread_mutex_lock(&mutex);
-	if (delayed_slot > -1) {
-		int vfd = *(int*)sig.sival_ptr;
-		send_report(vfd, 1);
-		delayed_slot = -1;
+	struct elan_application *app = (struct elan_application*)sig.sival_ptr;
+	if (app->delayed) {
+		app->delayed = 0;
+		send_report(app, app->delayed);
 	}
 #ifdef MEASURE_TIME
 	clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
-	printf("Timer triggered: %lu ms\n", delta_ms());
+	printf("Timer triggered: %d ms\n", ts_delta_msec(&stop_ts, &start_ts));
 #endif
 	pthread_mutex_unlock(&mutex);
 }
 
-void init_globals(int *vfd) {
+
+static int needs_delay(struct contact *state) {
+	int current_touches = 0;
+	int num_reported = 0;
+
+	for (int i = 0; i < MAX_CONTACTS; i++) {
+		if ((state[i]).in_report) {
+			num_reported++;
+		}
+		if ((state[i]).touch)
+			current_touches++;
+	}
+
+	return num_reported == 1 && current_touches == 0;
+}
+
+
+void init_globals(struct elan_application *app) {
 	se.sigev_notify = SIGEV_THREAD;
-	se.sigev_value.sival_ptr = vfd;
+	se.sigev_value.sival_ptr = app;
 	se.sigev_notify_function = timer_thread;
 	se.sigev_notify_attributes = NULL;
 
@@ -232,31 +250,47 @@ void init_globals(int *vfd) {
 
 	timer_create(CLOCK_REALTIME, &se, &timer_id);
 
+	app->left_button_state = 0;
+	app->last_tracking_id = MT_ID_MIN;
+	app->delayed = 0;
+	app->num_received = 0;
+
 	for (int i = 0; i < MAX_CONTACTS; i++) {
-		hw_state[i].in_report = 0;
-		hw_state[i].x = 0;
-		hw_state[i].y = 0;
-		hw_state[i].tool = MT_TOOL_FINGER;
-		hw_state[i].touch = 0;
-
-		tracking_ids[i] = MT_ID_NULL;
+		app->hw_state[i].in_report = 0;
+		app->hw_state[i].x = 0;
+		app->hw_state[i].y = 0;
+		app->hw_state[i].tool = 1;
+		app->hw_state[i].touch = 0;
+		app->tracking_ids[i] = MT_ID_NULL;
 	}
-
-	memcpy(prev_state, hw_state, sizeof(hw_state));
 }
 
-void do_capture(int fd, int vfd) {
 
-	init_globals(&vfd);
+void buf_to_usages(unsigned char *buf, struct elan_usages *usages) {
+	usages->x = ((buf[3] & 0x0f) << 8) | buf[2];
+	usages->y = ((buf[5] & 0x0f) << 8) | buf[4];
+	usages->touch = (buf[1] & 0x0f) == 3;
+	usages->tool = buf[9] < 63;
+	usages->slot = buf[1] >> 4;
+	usages->num_contacts = buf[8];
+	// width = (buf[11] & 0x0f)
+	// height = (buf[11] >> 4)
+	// timestamp = (buf[7] << 8) + buf[6]
+	// ? = buf[10]
+}
 
-	unsigned char buf[12];
-	int slot;
-	int x;
-	int y;
-	int num_expected;
-	int num_received;
-	int tool;
 
+static void do_capture(int fd, int vfd) {
+
+	struct elan_usages usages;
+	struct elan_application app;
+	app.vfd = vfd;
+
+	init_globals(&app);
+
+	unsigned char buf[14];
+	int is_touch;
+	int is_release;
 	int rc;
 
 	while(!stop) {
@@ -267,53 +301,64 @@ void do_capture(int fd, int vfd) {
 		// ignore 0x40 event
 		if (buf[0] != 0x04 || buf[1] == 0x40)
 			continue;
-		
-		int is_touch = (buf[1] & 0x0f) == 3;
-		int is_release = (buf[1] & 0x0f) == 1;
 
+		// ignore irrelevant states if any
+		is_touch = (buf[1] & 0x0f) == 3;
+		is_release = (buf[1] & 0x0f) == 1;
 		if (!is_touch && !is_release)
 			continue;
-
-		slot = buf[1] >> 4;
-		hw_state[slot].in_report = 1;
-
-		if (buf[8] > 0) {
-			num_received = 0;
-			num_expected = buf[8];
-		}
-		num_received++;
-
-		tool = buf[9] > 64 ? MT_TOOL_PALM : MT_TOOL_FINGER;
-		x = ((buf[3] & 0x0f) << 8) | buf[2];
-		y = ((buf[5] & 0x0f) << 8) | buf[4];
-		btn_left = buf[9] & 0x01;
-		// width = (buf[11] & 0x0f)
-		// height = (buf[11] >> 4)
-		// timestamp = (buf[7] << 8) + buf[6]
-		// ? = buf[10]
-		hw_state[slot].x = x;
-		hw_state[slot].y = y;
-		hw_state[slot].tool = tool;
-		hw_state[slot].touch = is_touch;
+		buf_to_usages(buf, &usages);
 
 		pthread_mutex_lock(&mutex);
-		if (delayed_slot > -1) {
-			delayed_slot = -1;
+		if (app.delayed) {
+			app.delayed = 0;
+			if (usages.num_contacts == 1) {
+				send_report(&app, 1);
+			}
 			ts.it_value.tv_nsec = 0;
 			timer_settime(timer_id, 0, &ts, 0);
 #ifdef MEASURE_TIME
 			clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
-			printf("Next event arrived: %lu ms\n", delta_ms());
+			printf("Next event arrived: %d ms\n",
+					ts_delta_msec(&stop_ts, &start_ts));
 #endif
 		}
 		pthread_mutex_unlock(&mutex);
 
-		if (num_received == num_expected) {
+		if (usages.num_contacts > 0)
+			app.num_expected = usages.num_contacts;
+
+		app.num_received++;
+
+		struct contact *ct = &app.hw_state[usages.slot];
+		ct->in_report = 1;
+		ct->tool = usages.tool;
+		ct->x = usages.x;
+		ct->y = usages.y;
+		ct->touch = usages.touch;
+
+		if (app.num_received != app.num_expected)
+			continue;
+
+		// clickpad button state
+		app.left_button_state = buf[9] & 0x01;
+
+		app.delayed = needs_delay(app.hw_state);
+		
+		if (app.delayed) {
+			memcpy(app.delayed_state, app.hw_state, sizeof(app.hw_state));
+			ts.it_value.tv_nsec = DELAY_NS;
+			timer_settime(timer_id, 0, &ts, 0);
+#ifdef MEASURE_TIME
+			printf("Timer started\n");
+			clock_gettime(CLOCK_MONOTONIC_RAW, &start_ts);
+#endif
+		} else {
 			pthread_mutex_lock(&mutex);
-			send_report(vfd, 0);
-			memcpy(prev_state, hw_state, sizeof(hw_state));
+			send_report(&app, 0);
 			pthread_mutex_unlock(&mutex);
 		}
+		app.num_received = 0;
 	}
 }
 
@@ -328,8 +373,8 @@ static int create_virtual_device() {
 	struct uinput_setup devsetup;
 	memset(&devsetup, 0, sizeof(devsetup));
 	devsetup.id.bustype = BUS_I2C;
-	devsetup.id.vendor = 0x04F3;
-	devsetup.id.product = 0x3022;
+	devsetup.id.vendor = VIRT_VID;
+	devsetup.id.product = VIRT_PID;
 	strcpy(devsetup.name, VIRTUAL_DEV_NAME);
 
 	ioctl(vfd, UI_SET_EVBIT, EV_SYN);
@@ -447,6 +492,7 @@ static int get_src_device(const char *dir, const char *prefix) {
 	return fd;
 }
 
+
 static int set_features(int fd) {
 	int res;
 	unsigned char buf[2];
@@ -462,6 +508,7 @@ static int set_features(int fd) {
 		return res;
 	return 0;
 }
+
 
 static int start_capture() {
 	int fd;

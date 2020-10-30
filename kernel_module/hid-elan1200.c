@@ -7,14 +7,16 @@ MODULE_DESCRIPTION("Elan1200 TouchPad");
 MODULE_LICENSE("GPL");
 
 
-#define DELAY 18
+#define DELAY 16
 #define DELAY_NS DELAY * 1000000
 
 //#define MEASURE_TIME
 #ifdef MEASURE_TIME
 static unsigned long start_j, stop_j;
-static unsigned int delta_ms(void) {
-	return jiffies_to_msecs(stop_j - start_j);
+
+static inline int
+j_delta_msec(unsigned long *a, unsigned long *b) {
+	return jiffies_to_msecs(*a - *b);
 }
 #endif
 
@@ -40,17 +42,19 @@ struct contact {
 };
 
 struct elan_application {
+	struct input_dev *input;
+
 	struct contact hw_state[MAX_CONTACTS];
-	struct contact prev_state[MAX_CONTACTS];
 	struct contact delayed_state[MAX_CONTACTS];
 
 	bool left_button_state;
-	int delayed_slot;
 	__s32 num_expected;
 	__s32 num_received;
 	
 	unsigned int last_tracking_id;
 	unsigned int tracking_ids[MAX_CONTACTS];
+
+	bool delayed;
 
 	__s32 dev_time;
 	unsigned long jiffies;
@@ -68,40 +72,40 @@ struct elan_features {
 
 struct elan_usages {
 	__s32 *x, *y;
-	__s32 *contactid;
-	bool *touch;
 	bool *tool;
+	bool *touch;
 	__s32 *slot;
 	__s32 *num_contacts;
 	__s32 *scantime;
 };
 
 struct elan_device {
-	struct timer_list release_timer;
-	struct input_dev *input;
 	struct hid_device *hdev;
+	struct timer_list timer;
+	spinlock_t lock;
 	struct elan_usages usages;
 	struct elan_application app;
 	struct elan_features features;
-	spinlock_t lock;
 };
 
 static void init_app(struct elan_application *app) {
 	int i;
+
 	app->timestamp = 0;
 	app->jiffies = 0;
 	app->prev_scantime = 0;
+
 	app->left_button_state = 0;
-	app->delayed_slot = -1;
 	app->last_tracking_id = MT_ID_MIN;
+	app->delayed = 0;
+	app->num_received = 0;
+
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		struct contact* hw = &app->hw_state[i];
-		struct contact* pr = &app->prev_state[i];
-		struct contact* de = &app->delayed_state[i];
-		hw->in_report = pr->in_report = de->in_report = 0;
-		hw->x = hw->y = pr->x = pr->y = de->x = de->y = 0;
-		hw->tool = pr->tool = de->tool = 0;
-		hw->touch = pr->touch = de->touch = 0;
+		hw->in_report = 0;
+		hw->x = hw->y = 0;
+		hw->tool = 1;
+		hw->touch = 0;
 		app->tracking_ids[i] = MT_ID_NULL;
 	}
 }
@@ -152,52 +156,23 @@ static void check_button_state(struct hid_device *hdev, struct hid_report *repor
 }
 
 
-static void send_report(struct elan_device *td, bool fr_timer)
+static void send_report(struct elan_application *app, bool delay)
 {
-	struct elan_application *app = &td->app;
-	struct input_dev *input = td->input;
+	struct input_dev *input = app->input;
 
 	int i;
 	int oldest_slot;
 	int old_id;
 	int current_id;
-	unsigned int id;
-	int tool = MT_TOOL_FINGER;
 	int current_touches = 0;
-	int prev_touches = 0;
-	int num_reported = 0;
-	int slot_to_delay = 0;
+	int tool = MT_TOOL_FINGER;
 	struct contact *ct;
-	struct contact *state = fr_timer ? app->delayed_state : app->hw_state;
-
-	for (i = 0; i < MAX_CONTACTS; i++) {
-		if (fr_timer)
-			break;
-		if (app->hw_state[i].in_report) {
-			num_reported++;
-			if (!app->hw_state[i].touch)
-				slot_to_delay = i;
-		}
-		if (app->hw_state[i].touch)
-			current_touches++;
-		if (app->prev_state[i].touch)
-			prev_touches++;
-	}
-
-	if (!fr_timer && prev_touches == 1 && current_touches == 0) {
-		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
-		app->delayed_slot = slot_to_delay;
-		mod_timer(&td->release_timer,
-			jiffies + nsecs_to_jiffies(DELAY_NS));
-#ifdef MEASURE_TIME
-		printk("Timer started\n");
-		start_j = jiffies;
-#endif
-		return;
-	}
+	struct contact *state = delay ? app->delayed_state : app->hw_state;
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
+		if (ct->touch)
+			current_touches++;
 		if (!ct->in_report)
 			continue;
 		input_mt_slot(input, i);
@@ -206,11 +181,10 @@ static void send_report(struct elan_device *td, bool fr_timer)
 			app->tracking_ids[i] = app->last_tracking_id++ % MT_ID_MAX;
 		if (!ct->touch)
 			app->tracking_ids[i] = MT_ID_NULL;
-		id = app->tracking_ids[i];
 
-		input_event(input, EV_ABS, ABS_MT_TRACKING_ID, id);
+		input_event(input, EV_ABS, ABS_MT_TRACKING_ID, app->tracking_ids[i]);
 
-		if (id != MT_ID_NULL) {
+		if (app->tracking_ids[i] != MT_ID_NULL) {
 			if (!ct->tool)
 				tool = MT_TOOL_PALM;
 			input_event(input, EV_ABS, ABS_MT_TOOL_TYPE, tool);
@@ -221,7 +195,7 @@ static void send_report(struct elan_device *td, bool fr_timer)
 		app->hw_state[i].in_report = 0;
 	}
 
-	if (!fr_timer && current_touches > 0) {
+	if (current_touches > 0) {
 		oldest_slot = 0;
 		old_id = app->last_tracking_id % MT_ID_MAX + 1;
 		for (i = 0; i < MAX_CONTACTS; i++) {
@@ -244,26 +218,43 @@ static void send_report(struct elan_device *td, bool fr_timer)
 
 	input_event(input, EV_KEY, BTN_LEFT, app->left_button_state);
 
-	if (!fr_timer)
-		input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
+	input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
 
 	input_sync(input);
 }
 
 
-static void elan_expired_timeout(struct timer_list *t)
+static void timer_thread(struct timer_list *t)
 {
-	struct elan_device *td = from_timer(td, t, release_timer);
+	struct elan_device *td = from_timer(td, t, timer);
+	struct elan_application *app = &td->app;
 	spin_lock(&td->lock);
+	if (app->delayed) {
+		app->delayed = 0;
+		send_report(app, 1);
+	}
 #ifdef MEASURE_TIME
 	stop_j = jiffies;
-	printk("Timer triggered: %u ms\n", delta_ms());
+	printk("Timer triggered: %d ms\n", j_delta_msec(&stop_j, &start_j));
 #endif
-	if (td->app.delayed_slot > -1) {
-		send_report(td, 1);
-		td->app.delayed_slot = -1;
-	}
 	spin_unlock(&td->lock);
+}
+
+
+static int needs_delay(struct contact *state) {
+	int i;
+	int current_touches = 0;
+	int num_reported = 0;
+
+	for (i = 0; i < MAX_CONTACTS; i++) {
+		if ((state[i]).in_report) {
+			num_reported++;
+		}
+		if ((state[i]).touch)
+			current_touches++;
+	}
+
+	return num_reported == 1 && current_touches == 0;
 }
 
 
@@ -272,50 +263,64 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 	struct hid_field *field = report->field[0];
 	struct elan_device *td = hid_get_drvdata(hdev);
 	struct elan_application *app = &td->app;
-	
-	int slot;
 
+	struct contact *ct;
+	
 	if (!(hdev->claimed & HID_CLAIMED_INPUT))
 		return;
 
 	if (!field || !field->hidinput || !field->hidinput->input)
 		return;
 
-	if (*td->usages.num_contacts > 0) {
-		app->num_expected = *td->usages.num_contacts;
-		app->num_received = 0;
-		check_button_state(hdev, report, app);
-	}
-
-	app->num_received++;
-
-	slot = *td->usages.slot;
-
 	spin_lock_bh(&td->lock);
-	if (app->delayed_slot > -1) {
-		app->delayed_slot = -1;
-		del_timer(&td->release_timer);
+	if (app->delayed) {
+		app->delayed = 0;
+		if (*td->usages.num_contacts == 1) {
+			send_report(app, 1);
+		}
+		del_timer_sync(&td->timer);
 #ifdef MEASURE_TIME
 		stop_j = jiffies;
-		printk("Next event arrived: %u ms\n", delta_ms());
+		printk("Next event arrived: %d ms\n", j_delta_msec(&stop_j, &start_j));
 #endif
 	}
 	spin_unlock_bh(&td->lock);
 
-	app->hw_state[slot].in_report = 1;
-	app->hw_state[slot].x = *td->usages.x;
-	app->hw_state[slot].y = *td->usages.y;
-	app->hw_state[slot].tool = *td->usages.tool;
-	app->hw_state[slot].touch = *td->usages.touch;
+	if (*td->usages.num_contacts > 0)
+		app->num_expected = *td->usages.num_contacts;
 
-	if (app->num_received == app->num_expected) {
+	app->num_received++;
+
+	ct = &app->hw_state[*td->usages.slot];
+	ct->in_report = 1;
+	ct->tool = *td->usages.tool;
+	ct->x = *td->usages.x;
+	ct->y = *td->usages.y;
+	ct->touch = *td->usages.touch;
+
+	if (app->num_received != app->num_expected)
+		return;
+
+	check_button_state(hdev, report, app);
+
+	app->delayed = needs_delay(app->hw_state);
+
+	if (app->delayed) {
+		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
+		mod_timer(&td->timer, jiffies + nsecs_to_jiffies(DELAY_NS));
+#ifdef MEASURE_TIME
+		printk("Timer started\n");
+		start_j = jiffies;
+#endif
+	} else {
 		spin_lock_bh(&td->lock);
 		app->timestamp = compute_timestamp(app, *td->usages.scantime);
-		td->input = field->hidinput->input;
-		send_report(td, 0);
-		memcpy(app->prev_state, app->hw_state, sizeof(app->hw_state));
+		app->input = field->hidinput->input;
+		send_report(app, 0);
 		spin_unlock_bh(&td->lock);
 	}
+
+	app->num_received = 0;
 }
 
 
@@ -495,7 +500,7 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	td->features.inputmode_report_id = -1;
 	td->features.latency_report_id = -1;
 
-	timer_setup(&td->release_timer, elan_expired_timeout, 0);
+	timer_setup(&td->timer, timer_thread, 0);
 	spin_lock_init(&td->lock);
 
 	ret = hid_parse(hdev);
@@ -515,7 +520,7 @@ static void elan_release_contacts(struct hid_device *hdev)
 {
 	struct elan_device *td = hid_get_drvdata(hdev);
 	struct elan_application *app = &td->app;
-	struct input_dev *input = td->input;
+	struct input_dev *input = app->input;
 	int i;
 
 	spin_lock_bh(&td->lock);
@@ -549,7 +554,7 @@ static int elan_resume(struct hid_device *hdev)
 static void elan_remove(struct hid_device *hdev)
 {
 	struct elan_device *td = hid_get_drvdata(hdev);
-	del_timer_sync(&td->release_timer);
+	del_timer_sync(&td->timer);
 	hid_hw_stop(hdev);
 }
 
