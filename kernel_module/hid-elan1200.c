@@ -34,6 +34,9 @@ j_delta_msec(unsigned long *a, unsigned long *b) {
 #define MT_ID_MIN	0
 #define MT_ID_MAX	65535
 
+#define DELAYED_FLAG_PENDING	1
+
+
 struct contact {
 	bool in_report;
 	__s32 x;
@@ -55,7 +58,7 @@ struct elan_application {
 	unsigned int last_tracking_id;
 	unsigned int tracking_ids[MAX_CONTACTS];
 
-	bool delayed;
+	unsigned long delayed_flags;
 
 	__s32 dev_time;
 	unsigned long jiffies;
@@ -83,7 +86,6 @@ struct elan_usages {
 struct elan_device {
 	struct hid_device *hdev;
 	struct timer_list timer;
-	spinlock_t lock;
 	struct elan_usages usages;
 	struct elan_application app;
 	struct elan_features features;
@@ -99,7 +101,6 @@ static void init_app_vars(struct elan_application *app) {
 
 	app->left_button_state = 0;
 	app->last_tracking_id = MT_ID_MIN;
-	app->delayed = 0;
 	app->num_received = 0;
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
@@ -110,6 +111,8 @@ static void init_app_vars(struct elan_application *app) {
 		hw->touch = 0;
 		app->tracking_ids[i] = MT_ID_NULL;
 	}
+
+	clear_bit(DELAYED_FLAG_PENDING, &app->delayed_flags);
 }
 
 
@@ -222,8 +225,8 @@ static void send_report(struct elan_application *app, bool delay)
 
 	input_event(input, EV_KEY, BTN_LEFT, app->left_button_state);
 
-	input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
-
+	if (delay)
+		input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
 	input_sync(input);
 }
 
@@ -232,16 +235,14 @@ static void timer_thread(struct timer_list *t)
 {
 	struct elan_device *td = from_timer(td, t, timer);
 	struct elan_application *app = &td->app;
-	spin_lock(&td->lock);
-	if (app->delayed) {
-		app->delayed = 0;
+
+	if (test_and_clear_bit(DELAYED_FLAG_PENDING, &app->delayed_flags)) {
 		send_report(app, 1);
 	}
 #ifdef MEASURE_TIME
 	stop_j = jiffies;
 	printk("Timer triggered: %d ms\n", j_delta_msec(&stop_j, &start_j));
 #endif
-	spin_unlock(&td->lock);
 }
 
 
@@ -273,22 +274,20 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 	if (!(hdev->claimed & HID_CLAIMED_INPUT))
 		return;
 
-	if (!field || !field->hidinput || !field->hidinput->input)
+	if (!field || !field->hidinput || !field->hidinput->input ||
+	    field->hidinput->input != app->input)
 		return;
 
-	spin_lock_bh(&td->lock);
-	if (app->delayed) {
-		app->delayed = 0;
+	if (test_and_clear_bit(DELAYED_FLAG_PENDING, &app->delayed_flags)) {
+		del_timer_sync(&td->timer);
 		if (*td->usages.num_contacts == 1) {
 			send_report(app, 1);
 		}
-		del_timer_sync(&td->timer);
 #ifdef MEASURE_TIME
 		stop_j = jiffies;
 		printk("Next event arrived: %d ms\n", j_delta_msec(&stop_j, &start_j));
 #endif
 	}
-	spin_unlock_bh(&td->lock);
 
 	if (*td->usages.num_contacts > 0)
 		app->num_expected = *td->usages.num_contacts;
@@ -307,21 +306,19 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 
 	check_button_state(hdev, report, app);
 
-	app->delayed = needs_delay(app->hw_state);
-
-	if (app->delayed) {
+	if (needs_delay(app->hw_state)) {
+		set_bit(DELAYED_FLAG_PENDING, &app->delayed_flags);
 		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
-		mod_timer(&td->timer, jiffies + nsecs_to_jiffies(DELAY_NS));
+		del_timer_sync(&td->timer);
+		td->timer.expires = jiffies + nsecs_to_jiffies(DELAY_NS);
+		add_timer(&td->timer);
 #ifdef MEASURE_TIME
 		printk("Timer started\n");
 		start_j = jiffies;
 #endif
 	} else {
-		spin_lock_bh(&td->lock);
 		app->timestamp = compute_timestamp(app, *td->usages.scantime);
-		app->input = field->hidinput->input;
 		send_report(app, 0);
-		spin_unlock_bh(&td->lock);
 	}
 
 	app->num_received = 0;
@@ -355,8 +352,9 @@ static int elan_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 	__s32 **target;
 	struct elan_device *td = hid_get_drvdata(hdev);
 
+	// export mouse input too
 	if (field->application != HID_DG_TOUCHPAD)
-		return -1;
+		return 0;
 
 	switch (usage->hid & HID_USAGE_PAGE) {
 	case HID_UP_GENDESK:
@@ -425,7 +423,9 @@ static int elan_input_mapped(struct hid_device *hdev, struct hid_input *hi,
 		struct hid_field *field, struct hid_usage *usage,
 		unsigned long **bit, int *max)
 {
-	return -1;
+	if (hi->application == HID_DG_TOUCHPAD)
+		return -1;
+	return 0;
 }
 
 
@@ -433,7 +433,18 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 {
 	int ret;
 	struct input_dev *input = hi->input;
+	struct elan_device *td = hid_get_drvdata(hdev);
 	char *name;
+
+	if (hi->application != HID_DG_TOUCHPAD)
+		return 0;
+
+	td->app.input = input;
+	name = devm_kzalloc(&hi->input->dev, strlen(INPUT_DEV_NAME) + 1, GFP_KERNEL);
+	if (name) {
+		sprintf(name, "%s", INPUT_DEV_NAME);
+		hi->input->name = name;
+	}
 
 	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
 
@@ -441,13 +452,36 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	if (ret)
 		return ret;
 
-	name = devm_kzalloc(&hi->input->dev, strlen(INPUT_DEV_NAME) + 2, GFP_KERNEL);
-	if (name) {
-		sprintf(name, INPUT_DEV_NAME);
-		hi->input->name = name;
+	return 0;
+}
+
+
+static void mt_get_feature(struct hid_device *hdev, struct hid_report *report)
+{
+	int ret;
+	u32 size = hid_report_len(report);
+	u8 *buf;
+
+	if (hdev->quirks & HID_QUIRK_NO_INIT_REPORTS)
+		return;
+
+	buf = hid_alloc_report_buf(report, GFP_KERNEL);
+	if (!buf)
+		return;
+
+	ret = hid_hw_raw_request(hdev, report->id, buf, size,
+				 HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
+	if (ret < 0) {
+		dev_warn(&hdev->dev, "failed to fetch feature %d\n",
+			 report->id);
+	} else {
+		ret = hid_report_raw_event(hdev, HID_FEATURE_REPORT, buf,
+					   size, 0);
+		if (ret)
+			dev_warn(&hdev->dev, "failed to report feature\n");
 	}
 
-	return 0;
+	kfree(buf);
 }
 
 
@@ -457,15 +491,30 @@ static void elan_feature_mapping(struct hid_device *hdev,
 	struct elan_device *td = hid_get_drvdata(hdev);
 
 	switch (usage->hid) {
+	case HID_DG_CONTACTMAX:
+		mt_get_feature(hdev, field->report);
+		break;
 	case HID_DG_INPUTMODE:
 		if (td->features.inputmode_report_id < 0) {
 			td->features.inputmode_report_id = field->report->id;
 			td->features.inputmode_index = usage->usage_index;
 		}
 		break;
+	case HID_DG_BUTTONTYPE:
+		if (usage->usage_index >= field->report_count) {
+			dev_err(&hdev->dev, "HID_DG_BUTTONTYPE out of range\n");
+			break;
+		}
+		mt_get_feature(hdev, field->report);
+		break;
 	case HID_DG_LATENCYMODE:
 		td->features.latency_report_id = field->report->id;
 		td->features.latency_index = usage->usage_index;
+		break;
+	case 0xff0000c5:
+		/* Retrieve the Win8 blob once to enable some devices */
+		if (usage->usage_index == 0)
+			mt_get_feature(hdev, field->report);
 		break;
 	}
 }
@@ -512,8 +561,10 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	td->features.inputmode_report_id = -1;
 	td->features.latency_report_id = -1;
 
+	hdev->quirks |= HID_QUIRK_NO_INPUT_SYNC;
+	hdev->quirks |= HID_QUIRK_INPUT_PER_APP;
+
 	timer_setup(&td->timer, timer_thread, 0);
-	spin_lock_init(&td->lock);
 
 	ret = hid_parse(hdev);
 	if (ret != 0)
@@ -528,7 +579,6 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	return 0;
 }
 
-
 static void elan_release_contacts(struct hid_device *hdev)
 {
 	struct elan_device *td = hid_get_drvdata(hdev);
@@ -536,7 +586,6 @@ static void elan_release_contacts(struct hid_device *hdev)
 	struct input_dev *input = app->input;
 	int i;
 
-	spin_lock_bh(&td->lock);
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		input_mt_slot(input, i);
 		input_mt_report_slot_inactive(input);
@@ -546,9 +595,7 @@ static void elan_release_contacts(struct hid_device *hdev)
 	}
 	input_mt_sync_frame(input);
 	input_sync(input);
-	spin_unlock_bh(&td->lock);
 }
-
 
 #ifdef CONFIG_PM
 static int elan_reset_resume(struct hid_device *hdev)

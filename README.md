@@ -63,10 +63,23 @@ sudo systemctl enable elan1200.service
 The `mirror_elan1200.c` in the directory just mirrors input events from the input device created by hid-multitouch without any modifications. It's my previous attempt to filter hardware reports in userspace.
 
 #### Option three
-Use the kernel module. Since `timer_list` works weirdly in kernel or (most probably) I use timers incorrectly, I don't use the module because of its bugginness and update the module irregularly, the latest kernel I tested it with is 5.8.
+Use the kernel module. Technically it does the same as the userspace driver, the difference is in an API. Linux Kernel's API tends to change, I use Debian stable with backports, the only kernel I can test is that one from the distribution. The latest version I tested it with is 5.8. Installation is typical as for any other module. Timings can also be measured compiling the module with the command `make CFLAGS=-DMEASURE_TIME` and watching prints in `dmesg -w`.
 
-The installation is typical as for any module installation. Then blacklist `hid-multitouch`.
+The directory also contains `dkms.conf` for installing and auto-recompiling during kernel updates.
+```sh
+# create module src dir and copy files
+sudo mkdir /usr/src/hid-elan1200-1.0
+sudo cp dkms.conf Makefile hid-elan1200.c /usr/src/hid-elan1200-1.0/
 
+# add to dkms and install
+sudo dkms install hid-elan1200/1.0
+
+# remove from dkms
+sudo dkms remove hid-elan1200/1.0 --all
+sudo rm -r /usr/src/hid-elan1200-1.0
+```
+
+Blacklisting `hid-multitouch` may be needed. Xorg conf files are similar to the userspace driver, difference is in the name of the exposed input device.
 
 ## Misc for ASUS UX310UQ
 ![ScreenShot](http://mishurov.co.uk/images/github/linux_elan1200_touchpad/pm.png)
@@ -91,6 +104,6 @@ References:
 - https://github.com/torvalds/linux/blob/master/drivers/hid/hid-multitouch.c
 - https://github.com/torvalds/linux/blob/master/drivers/input/input-mt.c
 - http://bitmath.org/code/mtdev/
-
+- https://docs.microsoft.com/en-us/windows-hardware/design/component-guidelines/windows-precision-touchpad-required-hid-top-level-collections
 
 

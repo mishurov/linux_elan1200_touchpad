@@ -10,7 +10,10 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include <time.h>
+#ifndef __STDC_NO_ATOMICS__
+#include <stdatomic.h>
+#endif
 #include <linux/hidraw.h>
 #include <linux/uinput.h>
 
@@ -22,7 +25,7 @@
 
 // on my machine 14 ms is minimum, otherwise
 // the delayed state is reported earlier than the next event arrives
-#define DELAY 15
+#define DELAY 16
 #define DELAY_NS DELAY * 1000000
 
 // gcc -o hid_elan1200 hid_elan1200.c -lrt -DMEASURE_TIME
@@ -92,8 +95,7 @@ struct elan_application {
 	int left_button_state;
 	int num_expected;
 	int num_received;
-	
-	int delayed;
+	atomic_bool delayed;
 
 	unsigned int last_tracking_id;
 	unsigned int tracking_ids[MAX_CONTACTS];
@@ -103,7 +105,6 @@ struct elan_application {
 static timer_t timer_id;
 static struct itimerspec ts;
 static struct sigevent se;
-static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // report data
 static struct input_event report[MAX_EVENTS];
@@ -207,17 +208,14 @@ static void send_report(struct elan_application *app, int delayed) {
 
 void timer_thread(union sigval sig)
 {
-	pthread_mutex_lock(&mutex);
 	struct elan_application *app = (struct elan_application*)sig.sival_ptr;
-	if (app->delayed) {
-		app->delayed = 0;
-		send_report(app, app->delayed);
+	if (atomic_exchange(&app->delayed, 0)) {
+		send_report(app, 1);
 	}
 #ifdef MEASURE_TIME
 	clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
 	printf("Timer triggered: %d ms\n", ts_delta_msec(&stop_ts, &start_ts));
 #endif
-	pthread_mutex_unlock(&mutex);
 }
 
 
@@ -252,7 +250,7 @@ void init_globals(struct elan_application *app) {
 
 	app->left_button_state = 0;
 	app->last_tracking_id = MT_ID_MIN;
-	app->delayed = 0;
+	atomic_init(&app->delayed, 0);
 	app->num_received = 0;
 
 	for (int i = 0; i < MAX_CONTACTS; i++) {
@@ -309,21 +307,18 @@ static void do_capture(int fd, int vfd) {
 			continue;
 		buf_to_usages(buf, &usages);
 
-		pthread_mutex_lock(&mutex);
-		if (app.delayed) {
-			app.delayed = 0;
+		if (atomic_exchange(&app.delayed, 0)) {
+			ts.it_value.tv_nsec = 0;
+			timer_settime(timer_id, 0, &ts, 0);
 			if (usages.num_contacts == 1) {
 				send_report(&app, 1);
 			}
-			ts.it_value.tv_nsec = 0;
-			timer_settime(timer_id, 0, &ts, 0);
 #ifdef MEASURE_TIME
 			clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
 			printf("Next event arrived: %d ms\n",
 					ts_delta_msec(&stop_ts, &start_ts));
 #endif
 		}
-		pthread_mutex_unlock(&mutex);
 
 		if (usages.num_contacts > 0)
 			app.num_expected = usages.num_contacts;
@@ -343,9 +338,8 @@ static void do_capture(int fd, int vfd) {
 		// clickpad button state
 		app.left_button_state = buf[9] & 0x01;
 
-		app.delayed = needs_delay(app.hw_state);
-		
-		if (app.delayed) {
+		if (needs_delay(app.hw_state)) {
+			atomic_store(&app.delayed, 1);
 			memcpy(app.delayed_state, app.hw_state, sizeof(app.hw_state));
 			ts.it_value.tv_nsec = DELAY_NS;
 			timer_settime(timer_id, 0, &ts, 0);
@@ -354,9 +348,7 @@ static void do_capture(int fd, int vfd) {
 			clock_gettime(CLOCK_MONOTONIC_RAW, &start_ts);
 #endif
 		} else {
-			pthread_mutex_lock(&mutex);
 			send_report(&app, 0);
-			pthread_mutex_unlock(&mutex);
 		}
 		app.num_received = 0;
 	}
@@ -485,7 +477,7 @@ static int get_src_device(const char *dir, const char *prefix) {
 
 	if (asprintf(&filename, "%s/%s%d", dir, prefix, devnum) < 0)
 		return -1;
-	
+
 	if ((fd = open(filename, O_RDONLY)) < 0) {
 		return -1;
 	}
