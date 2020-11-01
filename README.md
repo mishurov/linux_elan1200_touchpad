@@ -79,7 +79,7 @@ sudo dkms remove hid-elan1200/1.0 --all
 sudo rm -r /usr/src/hid-elan1200-1.0
 ```
 
-Blacklisting `hid-multitouch` may be needed. Xorg conf files are similar to the userspace driver, difference is in the name of the exposed input device.
+Blacklisting `hid-multitouch` may be needed. Sample Xorg conf are the same as for the userspace driver, they handle both names of the exposed input devices.
 
 ## Misc for ASUS UX310UQ
 ![ScreenShot](http://mishurov.co.uk/images/github/linux_elan1200_touchpad/pm.png)
@@ -105,5 +105,3 @@ References:
 - https://github.com/torvalds/linux/blob/master/drivers/input/input-mt.c
 - http://bitmath.org/code/mtdev/
 - https://docs.microsoft.com/en-us/windows-hardware/design/component-guidelines/windows-precision-touchpad-required-hid-top-level-collections
-
-
