@@ -63,7 +63,7 @@ sudo systemctl enable elan1200.service
 The `mirror_elan1200.c` in the directory just mirrors input events from the input device created by hid-multitouch without any modifications. It's my previous attempt to filter hardware reports in userspace.
 
 #### Option three
-Use the kernel module. Technically it does the same as the userspace driver, the difference is in an API. Linux Kernel's API tends to change, I use Debian stable with backports, the only kernel I can test is that one from the distribution. The latest version I tested it with is 5.8. Installation is typical as for any other module. Timings can also be measured compiling the module with the command `make CFLAGS=-DMEASURE_TIME` and watching prints in `dmesg -w`.
+Use the kernel module. (**BUGGY! Randonly stops working for some reason**) Technically it does the same as the userspace driver, the difference is in an API. Linux Kernel's API tends to change, I use Debian stable with backports, the only kernel I can test is that one from the distribution. The latest version I tested it with is 5.8. Installation is typical as for any other module. Timings can also be measured compiling the module with the command `make CFLAGS=-DMEASURE_TIME` and watching prints in `dmesg -w`.
 
 The directory also contains `dkms.conf` for installing and auto-recompiling during kernel updates.
 ```sh

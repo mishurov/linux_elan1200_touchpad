@@ -25,31 +25,20 @@
 
 // on my machine 14 ms is minimum, otherwise
 // the delayed state is reported earlier than the next event arrives
-#define DELAY 16
+#define DELAY 17
 #define DELAY_NS DELAY * 1000000
 
 // gcc -o hid_elan1200 hid_elan1200.c -lrt -DMEASURE_TIME
 #ifdef MEASURE_TIME
 static struct timespec start_ts, stop_ts;
-
-static inline long
-ts_delta_msec(const struct timespec *a, const struct timespec *b)
-{
-	struct timespec r;
-	r.tv_sec = a->tv_sec - b->tv_sec;
-	r.tv_nsec = a->tv_nsec - b->tv_nsec;
-	if (r.tv_nsec < 0) {
-		r.tv_sec--;
-		r.tv_nsec += 1000000000;
-	}
-	return (long)r.tv_sec * 1000 + r.tv_nsec / 1000000;
-}
 #endif
 
 #define MAX_X 3200
 #define MAX_Y 2198
 #define RESOLUTION 31
 #define MAX_CONTACTS 5
+#define MAX_SCANTIME ((255 << 8) | 255)
+#define MAX_TIMESTAMP_INTERVAL 1000000
 
 #define INPUT_MODE_REPORT_ID 0x3
 #define INPUT_MODE_TOUCHPAD 0x03
@@ -61,6 +50,13 @@ ts_delta_msec(const struct timespec *a, const struct timespec *b)
 #define MT_ID_NULL	(-1)
 #define MT_ID_MIN	0
 #define MT_ID_MAX	65535
+
+#define TIMER_SYNC_DELAY 1 * 1000000
+#define INPUT_SYNC_DELAY 4 * 1000000
+
+
+#define ELAN_REPORT_ID 0x04
+#define ELAN_REPORT_SIZE 14
 
 // interrupts
 static volatile sig_atomic_t stop = 0;
@@ -84,6 +80,7 @@ struct elan_usages {
 	int touch;
 	int slot;
 	int num_contacts;
+	int scantime;
 };
 
 struct elan_application {
@@ -95,16 +92,26 @@ struct elan_application {
 	int left_button_state;
 	int num_expected;
 	int num_received;
-	atomic_bool delayed;
+	atomic_bool delayed_flag_pending;
+	atomic_bool delayed_flag_running;
+	atomic_bool had_run;
 
 	unsigned int last_tracking_id;
 	unsigned int tracking_ids[MAX_CONTACTS];
+
+	struct timespec ts;
+	int timestamp;
+	int prev_scantime;
+	int scantime_logical_max;
 };
 
 // timer
 static timer_t timer_id;
 static struct itimerspec ts;
 static struct sigevent se;
+static struct timespec timer_sync_ts;
+static struct timespec input_sync_ts;
+static struct timespec now_ts;
 
 // report data
 static struct input_event report[MAX_EVENTS];
@@ -112,6 +119,49 @@ static struct input_event report[MAX_EVENTS];
 // buttons
 static int btn_tools[5] = { BTN_TOOL_FINGER, BTN_TOOL_DOUBLETAP, BTN_TOOL_TRIPLETAP,
 			BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP };
+
+
+static inline unsigned long
+ts_delta_usec(const struct timespec *a, const struct timespec *b)
+{
+	struct timespec r;
+	r.tv_sec = a->tv_sec - b->tv_sec;
+	r.tv_nsec = a->tv_nsec - b->tv_nsec;
+	if (r.tv_nsec < 0) {
+		r.tv_sec--;
+		r.tv_nsec += 1000000000;
+	}
+	return (unsigned long)r.tv_sec * 1000000 + r.tv_nsec / 1000;
+}
+
+static inline unsigned long
+ts_delta_msec(const struct timespec *a, const struct timespec *b)
+{
+	return ts_delta_usec(a, b) / 1000;
+}
+
+
+static int compute_timestamp(struct elan_application *app, int value)
+{
+	int delta = value - app->prev_scantime;
+
+	clock_gettime(CLOCK_MONOTONIC_RAW, &now_ts);
+	unsigned long tsdelta = ts_delta_usec(&now_ts, &app->ts);
+
+	app->ts = now_ts;
+
+	if (delta < 0)
+		delta += app->scantime_logical_max;
+
+	delta *= 100;
+
+	app->prev_scantime = value;
+	
+	if (tsdelta > MAX_TIMESTAMP_INTERVAL)
+		return 0;
+	else
+		return app->timestamp + delta;
+}
 
 
 static void send_report(struct elan_application *app, int delayed) {
@@ -199,6 +249,10 @@ static void send_report(struct elan_application *app, int delayed) {
 	report[j].code = BTN_LEFT;
 	report[j++].value = app->left_button_state;
 
+	report[j].type = EV_MSC;
+	report[j].code = MSC_TIMESTAMP;
+	report[j++].value = app->timestamp;
+
 	report[j].type = EV_SYN;
 	report[j++].code = SYN_REPORT;
 
@@ -209,15 +263,23 @@ static void send_report(struct elan_application *app, int delayed) {
 void timer_thread(union sigval sig)
 {
 	struct elan_application *app = (struct elan_application*)sig.sival_ptr;
-	if (atomic_exchange(&app->delayed, 0)) {
+	if (atomic_exchange(&app->delayed_flag_pending, 0)) {
+		atomic_store(&app->delayed_flag_running, 1);
 		send_report(app, 1);
+		atomic_store(&app->delayed_flag_running, 0);
 	}
 #ifdef MEASURE_TIME
 	clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
-	printf("Timer triggered: %d ms\n", ts_delta_msec(&stop_ts, &start_ts));
+	printf("Timer triggered: %lu ms\n", ts_delta_msec(&stop_ts, &start_ts));
 #endif
 }
 
+void stop_timer_sync(struct elan_application *app) {
+	while(atomic_load(&app->delayed_flag_running))
+		nanosleep(&timer_sync_ts, &timer_sync_ts);
+	ts.it_value.tv_nsec = 0;
+	timer_settime(timer_id, 0, &ts, 0);
+}
 
 static int needs_delay(struct contact *state) {
 	int current_touches = 0;
@@ -246,12 +308,21 @@ void init_globals(struct elan_application *app) {
 	ts.it_interval.tv_sec = 0;
 	ts.it_interval.tv_nsec = 0;
 
+	timer_sync_ts.tv_nsec = TIMER_SYNC_DELAY;
+	input_sync_ts.tv_nsec = INPUT_SYNC_DELAY;
+
 	timer_create(CLOCK_REALTIME, &se, &timer_id);
 
 	app->left_button_state = 0;
 	app->last_tracking_id = MT_ID_MIN;
-	atomic_init(&app->delayed, 0);
+	atomic_init(&app->delayed_flag_pending, 0);
+	atomic_init(&app->delayed_flag_running, 0);
 	app->num_received = 0;
+
+	clock_gettime(CLOCK_MONOTONIC_RAW, &app->ts);
+	app->timestamp = 0;
+	app->prev_scantime = 0;
+	app->scantime_logical_max = MAX_SCANTIME;
 
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		app->hw_state[i].in_report = 0;
@@ -271,9 +342,9 @@ void buf_to_usages(unsigned char *buf, struct elan_usages *usages) {
 	usages->tool = buf[9] < 63;
 	usages->slot = buf[1] >> 4;
 	usages->num_contacts = buf[8];
+	usages->scantime = (buf[7] << 8) | buf[6];
 	// width = (buf[11] & 0x0f)
 	// height = (buf[11] >> 4)
-	// timestamp = (buf[7] << 8) + buf[6]
 	// ? = buf[10]
 }
 
@@ -286,7 +357,7 @@ static void do_capture(int fd, int vfd) {
 
 	init_globals(&app);
 
-	unsigned char buf[14];
+	unsigned char buf[ELAN_REPORT_SIZE];
 	int is_touch;
 	int is_release;
 	int rc;
@@ -297,7 +368,7 @@ static void do_capture(int fd, int vfd) {
 			break;
 		}
 		// ignore 0x40 event
-		if (buf[0] != 0x04 || buf[1] == 0x40)
+		if (buf[0] != ELAN_REPORT_ID || buf[1] == 0x40)
 			continue;
 
 		// ignore irrelevant states if any
@@ -307,17 +378,20 @@ static void do_capture(int fd, int vfd) {
 			continue;
 		buf_to_usages(buf, &usages);
 
-		if (atomic_exchange(&app.delayed, 0)) {
-			ts.it_value.tv_nsec = 0;
-			timer_settime(timer_id, 0, &ts, 0);
+		if (atomic_exchange(&app.delayed_flag_pending, 0)) {
+			stop_timer_sync(&app);
 			if (usages.num_contacts == 1) {
 				send_report(&app, 1);
+				nanosleep(&input_sync_ts, &input_sync_ts);
 			}
 #ifdef MEASURE_TIME
 			clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
-			printf("Next event arrived: %d ms\n",
+			printf("Next event arrived: %lu ms\n",
 					ts_delta_msec(&stop_ts, &start_ts));
 #endif
+		} else if (atomic_load(&app.delayed_flag_running)) {
+			stop_timer_sync(&app);
+			nanosleep(&input_sync_ts, &input_sync_ts);
 		}
 
 		if (usages.num_contacts > 0)
@@ -338,11 +412,14 @@ static void do_capture(int fd, int vfd) {
 		// clickpad button state
 		app.left_button_state = buf[9] & 0x01;
 
+		app.timestamp = compute_timestamp(&app, usages.scantime);
+
 		if (needs_delay(app.hw_state)) {
-			atomic_store(&app.delayed, 1);
+			stop_timer_sync(&app);
 			memcpy(app.delayed_state, app.hw_state, sizeof(app.hw_state));
 			ts.it_value.tv_nsec = DELAY_NS;
 			timer_settime(timer_id, 0, &ts, 0);
+			atomic_store(&app.delayed_flag_pending, 1);
 #ifdef MEASURE_TIME
 			printf("Timer started\n");
 			clock_gettime(CLOCK_MONOTONIC_RAW, &start_ts);
@@ -412,6 +489,8 @@ static int create_virtual_device() {
 		}
 		ioctl(vfd, UI_ABS_SETUP, &abssetup);
 	}
+	ioctl(vfd, UI_SET_EVBIT, EV_MSC);
+	ioctl(vfd, UI_SET_MSCBIT, MSC_TIMESTAMP);
 
 	unsigned int prop_bits[2] = { INPUT_PROP_POINTER, INPUT_PROP_BUTTONPAD };
 	for (int i = 0; i < 2; i++)
