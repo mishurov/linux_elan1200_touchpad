@@ -51,8 +51,7 @@ static struct timespec start_ts, stop_ts;
 #define MT_ID_MIN	0
 #define MT_ID_MAX	65535
 
-#define TIMER_SYNC_DELAY 1 * 1000000
-#define INPUT_SYNC_DELAY 4 * 1000000
+#define INPUT_SYNC_NDELAY 4000000
 
 
 #define ELAN_REPORT_ID 0x04
@@ -109,7 +108,6 @@ struct elan_application {
 static timer_t timer_id;
 static struct itimerspec ts;
 static struct sigevent se;
-static struct timespec timer_sync_ts;
 static struct timespec input_sync_ts;
 static struct timespec now_ts;
 
@@ -263,23 +261,17 @@ static void send_report(struct elan_application *app, int delayed) {
 void timer_thread(union sigval sig)
 {
 	struct elan_application *app = (struct elan_application*)sig.sival_ptr;
+	atomic_store(&app->delayed_flag_running, 1);
 	if (atomic_exchange(&app->delayed_flag_pending, 0)) {
-		atomic_store(&app->delayed_flag_running, 1);
 		send_report(app, 1);
-		atomic_store(&app->delayed_flag_running, 0);
 	}
+	atomic_store(&app->delayed_flag_running, 0);
 #ifdef MEASURE_TIME
 	clock_gettime(CLOCK_MONOTONIC_RAW, &stop_ts);
 	printf("Timer triggered: %lu ms\n", ts_delta_msec(&stop_ts, &start_ts));
 #endif
 }
 
-void stop_timer_sync(struct elan_application *app) {
-	while(atomic_load(&app->delayed_flag_running))
-		nanosleep(&timer_sync_ts, &timer_sync_ts);
-	ts.it_value.tv_nsec = 0;
-	timer_settime(timer_id, 0, &ts, 0);
-}
 
 static int needs_delay(struct contact *state) {
 	int current_touches = 0;
@@ -308,8 +300,7 @@ void init_globals(struct elan_application *app) {
 	ts.it_interval.tv_sec = 0;
 	ts.it_interval.tv_nsec = 0;
 
-	timer_sync_ts.tv_nsec = TIMER_SYNC_DELAY;
-	input_sync_ts.tv_nsec = INPUT_SYNC_DELAY;
+	input_sync_ts.tv_nsec = INPUT_SYNC_NDELAY;
 
 	timer_create(CLOCK_REALTIME, &se, &timer_id);
 
@@ -379,7 +370,6 @@ static void do_capture(int fd, int vfd) {
 		buf_to_usages(buf, &usages);
 
 		if (atomic_exchange(&app.delayed_flag_pending, 0)) {
-			stop_timer_sync(&app);
 			if (usages.num_contacts == 1) {
 				send_report(&app, 1);
 				nanosleep(&input_sync_ts, &input_sync_ts);
@@ -390,7 +380,6 @@ static void do_capture(int fd, int vfd) {
 					ts_delta_msec(&stop_ts, &start_ts));
 #endif
 		} else if (atomic_load(&app.delayed_flag_running)) {
-			stop_timer_sync(&app);
 			nanosleep(&input_sync_ts, &input_sync_ts);
 		}
 
@@ -415,7 +404,6 @@ static void do_capture(int fd, int vfd) {
 		app.timestamp = compute_timestamp(&app, usages.scantime);
 
 		if (needs_delay(app.hw_state)) {
-			stop_timer_sync(&app);
 			memcpy(app.delayed_state, app.hw_state, sizeof(app.hw_state));
 			ts.it_value.tv_nsec = DELAY_NS;
 			timer_settime(timer_id, 0, &ts, 0);
