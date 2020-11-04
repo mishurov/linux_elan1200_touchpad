@@ -50,6 +50,7 @@ static struct timespec start_ts, stop_ts;
 #define MT_ID_NULL	(-1)
 #define MT_ID_MIN	0
 #define MT_ID_MAX	65535
+#define MT_ID_SGN	((MT_ID_MAX + 1) >> 1)
 
 #define INPUT_SYNC_NDELAY 4000000
 
@@ -95,8 +96,8 @@ struct elan_application {
 	atomic_bool delayed_flag_running;
 	atomic_bool had_run;
 
-	unsigned int last_tracking_id;
-	unsigned int tracking_ids[MAX_CONTACTS];
+	int last_tracking_id;
+	int tracking_ids[MAX_CONTACTS];
 
 	struct timespec ts;
 	int timestamp;
@@ -182,7 +183,7 @@ static void send_report(struct elan_application *app, int delayed) {
 		report[j++].value = i;
 
 		if (ct->touch && app->tracking_ids[i] == MT_ID_NULL)
-			app->tracking_ids[i] = app->last_tracking_id++ % MT_ID_MAX;
+			app->tracking_ids[i] = app->last_tracking_id++ & MT_ID_MAX;
 		if (!ct->touch)
 			app->tracking_ids[i] = MT_ID_NULL;
 
@@ -217,7 +218,7 @@ static void send_report(struct elan_application *app, int delayed) {
 			if (app->tracking_ids[i] == MT_ID_NULL)
 				continue;
 			current_id = app->tracking_ids[i];
-			if (current_id < old_id) {
+			if ((current_id - old_id) & MT_ID_SGN) {
 				oldest_slot = i;
 				old_id = current_id;
 			}

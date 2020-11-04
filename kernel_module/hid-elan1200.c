@@ -1,3 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ *  HID driver for Elan1200 Touchpad
+ *
+ *  Copyright (c) 2017-2020 Alexander Mishurov <ammishurov@gmail.com>
+ *
+ *  This code is partly based on hid-multitouch.c:
+ *
+ *  Copyright (c) 2010-2012 Stephane Chatty <chatty@enac.fr>
+ *  Copyright (c) 2010-2013 Benjamin Tissoires <benjamin.tissoires@gmail.com>
+ *  Copyright (c) 2010-2012 Ecole Nationale de l'Aviation Civile, France
+ *  Copyright (c) 2012-2013 Red Hat, Inc
+ */
+
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/hid.h>
@@ -5,7 +19,7 @@
 
 
 MODULE_AUTHOR("Alexander Mishurov <ammishurov@gmail.com>");
-MODULE_DESCRIPTION("Elan1200 TouchPad");
+MODULE_DESCRIPTION("Elan1200 Touchpad");
 MODULE_LICENSE("GPL");
 
 
@@ -21,7 +35,8 @@ j_delta_msec(unsigned long *a, unsigned long *b) {
 }
 #endif
 
-#define INPUT_DEV_NAME "FilteredELAN1200"
+#define INPUT_DEV_TOUCHPAD_NAME "FilteredELAN1200"
+#define INPUT_DEV_MOUSE_NAME "ELAN1200 Mouse"
 
 #define MAX_CONTACTS 5
 #define MAX_TIMESTAMP_INTERVAL 1000000
@@ -35,6 +50,7 @@ j_delta_msec(unsigned long *a, unsigned long *b) {
 #define MT_ID_NULL	(-1)
 #define MT_ID_MIN	0
 #define MT_ID_MAX	65535
+#define MT_ID_SGN	((MT_ID_MAX + 1) >> 1)
 
 #define DELAYED_FLAG_PENDING	0
 #define DELAYED_FLAG_RUNNING	1
@@ -64,8 +80,8 @@ struct elan_application {
 	__s32 num_expected;
 	__s32 num_received;
 
-	unsigned int last_tracking_id;
-	unsigned int tracking_ids[MAX_CONTACTS];
+	int last_tracking_id;
+	int tracking_ids[MAX_CONTACTS];
 
 	unsigned long delayed_flags;
 	struct timer_list timer;
@@ -126,7 +142,7 @@ static void init_app_vars(struct elan_application *app) {
 }
 
 
-static int compute_timestamp(struct elan_application *app, __s32 value)
+static int mt_compute_timestamp(struct elan_application *app, __s32 value)
 {
 	long delta = value - app->prev_scantime;
 	unsigned long jdelta = jiffies_to_usecs(jiffies - app->jiffies);
@@ -197,7 +213,7 @@ static void send_report(struct elan_application *app, bool delay)
 		input_mt_slot(input, i);
 
 		if (ct->touch && app->tracking_ids[i] == MT_ID_NULL)
-			app->tracking_ids[i] = app->last_tracking_id++ % MT_ID_MAX;
+			app->tracking_ids[i] = app->last_tracking_id++ & MT_ID_MAX;
 		if (!ct->touch)
 			app->tracking_ids[i] = MT_ID_NULL;
 
@@ -221,7 +237,7 @@ static void send_report(struct elan_application *app, bool delay)
 			if (app->tracking_ids[i] == MT_ID_NULL)
 				continue;
 			current_id = app->tracking_ids[i];
-			if (current_id < old_id) {
+			if ((current_id - old_id) & MT_ID_SGN) {
 				oldest_slot = i;
 				old_id = current_id;
 			}
@@ -308,7 +324,7 @@ static void elan_touchpad_report(struct elan_application *app,
 	if (app->num_received != app->num_expected)
 		return;
 
-	app->timestamp = compute_timestamp(app, *usages->scantime);
+	app->timestamp = mt_compute_timestamp(app, *usages->scantime);
 
 	if (needs_delay(app->hw_state)) {
 		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
@@ -460,20 +476,31 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	int ret;
 	struct input_dev *input = hi->input;
 	struct elan_device *td = hid_get_drvdata(hdev);
-	char *name;
+	char *input_name;
+	const char *name = NULL;
+
+	switch (hi->application) {
+	case HID_GD_MOUSE:
+		name = INPUT_DEV_MOUSE_NAME;
+		break;
+	case HID_DG_TOUCHPAD:
+		td->app.input = input;
+		name = INPUT_DEV_TOUCHPAD_NAME;
+		break;
+	default:
+		return 0;
+	}
+
+	input_name = devm_kzalloc(&hi->input->dev, strlen(name) + 1, GFP_KERNEL);
+	if (input_name) {
+		sprintf(input_name, "%s", name);
+		hi->input->name = name;
+	}
 
 	if (hi->application != HID_DG_TOUCHPAD)
 		return 0;
 
-	td->app.input = input;
-	name = devm_kzalloc(&hi->input->dev, strlen(INPUT_DEV_NAME) + 1, GFP_KERNEL);
-	if (name) {
-		sprintf(name, "%s", INPUT_DEV_NAME);
-		hi->input->name = name;
-	}
-
 	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
-
 	ret = input_mt_init_slots(input, MAX_CONTACTS, INPUT_MT_POINTER);
 	if (ret)
 		return ret;
