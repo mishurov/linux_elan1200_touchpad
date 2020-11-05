@@ -81,6 +81,7 @@ struct elan_usages {
 	int slot;
 	int num_contacts;
 	int scantime;
+	int btn_left;
 };
 
 struct elan_application {
@@ -213,7 +214,7 @@ static void send_report(struct elan_application *app, int delayed) {
 	if (current_touches > 0) {
 		int current_id;
 		int oldest_slot = 0;
-		int old_id = app->last_tracking_id % MT_ID_MAX + 1;
+		int old_id = app->last_tracking_id;
 		for (int i = 0; i < MAX_CONTACTS; i++) {
 			if (app->tracking_ids[i] == MT_ID_NULL)
 				continue;
@@ -328,16 +329,17 @@ void init_globals(struct elan_application *app) {
 
 
 void buf_to_usages(unsigned char *buf, struct elan_usages *usages) {
+	usages->slot = buf[1] >> 4;
+	usages->touch = (buf[1] & 0x0f) == 3;
 	usages->x = ((buf[3] & 0x0f) << 8) | buf[2];
 	usages->y = ((buf[5] & 0x0f) << 8) | buf[4];
-	usages->touch = (buf[1] & 0x0f) == 3;
-	usages->tool = buf[9] < 63;
-	usages->slot = buf[1] >> 4;
-	usages->num_contacts = buf[8];
 	usages->scantime = (buf[7] << 8) | buf[6];
+	usages->num_contacts = buf[8];
+	usages->tool = (buf[9] >> 1) < 38;
+	usages->btn_left = buf[9] & 0x01;
+	// ? = buf[10]
 	// width = (buf[11] & 0x0f)
 	// height = (buf[11] >> 4)
-	// ? = buf[10]
 }
 
 
@@ -384,8 +386,10 @@ static void do_capture(int fd, int vfd) {
 			nanosleep(&input_sync_ts, &input_sync_ts);
 		}
 
-		if (usages.num_contacts > 0)
+		if (usages.num_contacts) {
 			app.num_expected = usages.num_contacts;
+			app.num_received = 0;
+		}
 
 		app.num_received++;
 
@@ -396,11 +400,10 @@ static void do_capture(int fd, int vfd) {
 		ct->y = usages.y;
 		ct->touch = usages.touch;
 
-		if (app.num_received != app.num_expected)
+		if (app.num_received < app.num_expected)
 			continue;
 
-		// clickpad button state
-		app.left_button_state = buf[9] & 0x01;
+		app.left_button_state = usages.btn_left;
 
 		app.timestamp = compute_timestamp(&app, usages.scantime);
 
@@ -416,7 +419,6 @@ static void do_capture(int fd, int vfd) {
 		} else {
 			send_report(&app, 0);
 		}
-		app.num_received = 0;
 	}
 }
 

@@ -104,6 +104,7 @@ struct elan_usages {
 	__s32 *x, *y;
 	bool *tool;
 	bool *touch;
+	bool *btn_left;
 	__s32 *slot;
 	__s32 *num_contacts;
 	__s32 *scantime;
@@ -163,34 +164,6 @@ static int mt_compute_timestamp(struct elan_application *app, __s32 value)
 }
 
 
-static void check_button_state(struct hid_device *hdev, struct hid_report *report,
-				struct elan_application* app) {
-	int r, n;
-	unsigned count;
-	struct hid_field *field;
-	struct hid_usage *usage;
-	__s32 value;
-
-	for (r = 0; r < report->maxfield; r++) {
-		field = report->field[r];
-		count = field->report_count;
-
-		if (!(HID_MAIN_ITEM_VARIABLE & field->flags))
-			continue;
-		for (n = 0; n < count; n++) {
-			usage = &field->usage[n];
-			value = field->value[n];
-			if (!usage->type || !(hdev->claimed & HID_CLAIMED_INPUT))
-				continue;
-			if (usage->type == EV_KEY && usage->code == BTN_LEFT) {
-				app->left_button_state = value;
-				continue;
-			}
-		}
-	}
-}
-
-
 static void send_report(struct elan_application *app, bool delay)
 {
 	struct input_dev *input = app->input;
@@ -232,7 +205,7 @@ static void send_report(struct elan_application *app, bool delay)
 
 	if (current_touches > 0) {
 		oldest_slot = 0;
-		old_id = app->last_tracking_id % MT_ID_MAX + 1;
+		old_id = app->last_tracking_id;
 		for (i = 0; i < MAX_CONTACTS; i++) {
 			if (app->tracking_ids[i] == MT_ID_NULL)
 				continue;
@@ -253,8 +226,7 @@ static void send_report(struct elan_application *app, bool delay)
 
 	input_event(input, EV_KEY, BTN_LEFT, app->left_button_state);
 
-	//if (delay)
-		input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
+	input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
 	input_sync(input);
 }
 
@@ -309,8 +281,10 @@ static void elan_touchpad_report(struct elan_application *app,
 		udelay(INPUT_SYNC_UDELAY);
 	}
 
-	if (*usages->num_contacts > 0)
+	if (*usages->num_contacts) {
 		app->num_expected = *usages->num_contacts;
+		app->num_received = 0;
+	}
 
 	app->num_received++;
 
@@ -321,8 +295,10 @@ static void elan_touchpad_report(struct elan_application *app,
 	ct->y = *usages->y;
 	ct->touch = *usages->touch;
 
-	if (app->num_received != app->num_expected)
+	if (app->num_received < app->num_expected)
 		return;
+
+	app->left_button_state = *usages->btn_left;
 
 	app->timestamp = mt_compute_timestamp(app, *usages->scantime);
 
@@ -337,8 +313,6 @@ static void elan_touchpad_report(struct elan_application *app,
 	} else {
 		send_report(app, 0);
 	}
-
-	app->num_received = 0;
 }
 
 
@@ -350,10 +324,8 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 	if (!(hdev->claimed & HID_CLAIMED_INPUT))
 		return;
 
-	if (report->id == ELAN_REPORT_ID && report->size == ELAN_REPORT_SIZE_BITS) {
-		check_button_state(hdev, report, &td->app);
+	if (report->id == ELAN_REPORT_ID && report->size == ELAN_REPORT_SIZE_BITS)
 		return elan_touchpad_report(&td->app, &td->usages);
-	}
 
 	if (field && field->hidinput && field->hidinput->input)
 		input_sync(field->hidinput->input);
@@ -443,14 +415,8 @@ static int elan_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 		}
 		return 0;
 	case HID_UP_BUTTON:
-		code = BTN_MOUSE + ((usage->hid - 1) & HID_USAGE);
-		if (field->application == HID_DG_TOUCHPAD &&
-		    (usage->hid & HID_USAGE) > 1)
-			code--;
-		hid_map_usage(hi, usage, bit, max, EV_KEY, code);
-		if (!*bit)
-			return -1;
-		input_set_capability(hi->input, EV_KEY, code);
+		input_set_capability(hi->input, EV_KEY, BTN_LEFT);
+		td->usages.btn_left = (bool*)&field->value[usage->usage_index];
 		return 1;
 	case 0xff000000:
 		return -1;
@@ -509,65 +475,21 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 }
 
 
-static void mt_get_feature(struct hid_device *hdev, struct hid_report *report)
-{
-	int ret;
-	u32 size = hid_report_len(report);
-	u8 *buf;
-
-	if (hdev->quirks & HID_QUIRK_NO_INIT_REPORTS)
-		return;
-
-	buf = hid_alloc_report_buf(report, GFP_KERNEL);
-	if (!buf)
-		return;
-
-	ret = hid_hw_raw_request(hdev, report->id, buf, size,
-				 HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
-	if (ret < 0) {
-		dev_warn(&hdev->dev, "failed to fetch feature %d\n",
-			 report->id);
-	} else {
-		ret = hid_report_raw_event(hdev, HID_FEATURE_REPORT, buf,
-					   size, 0);
-		if (ret)
-			dev_warn(&hdev->dev, "failed to report feature\n");
-	}
-
-	kfree(buf);
-}
-
-
 static void elan_feature_mapping(struct hid_device *hdev,
 		struct hid_field *field, struct hid_usage *usage)
 {
 	struct elan_device *td = hid_get_drvdata(hdev);
 
 	switch (usage->hid) {
-	case HID_DG_CONTACTMAX:
-		mt_get_feature(hdev, field->report);
-		break;
 	case HID_DG_INPUTMODE:
 		if (td->features.inputmode_report_id < 0) {
 			td->features.inputmode_report_id = field->report->id;
 			td->features.inputmode_index = usage->usage_index;
 		}
 		break;
-	case HID_DG_BUTTONTYPE:
-		if (usage->usage_index >= field->report_count) {
-			dev_err(&hdev->dev, "HID_DG_BUTTONTYPE out of range\n");
-			break;
-		}
-		mt_get_feature(hdev, field->report);
-		break;
 	case HID_DG_LATENCYMODE:
 		td->features.latency_report_id = field->report->id;
 		td->features.latency_index = usage->usage_index;
-		break;
-	case 0xff0000c5:
-		/* Retrieve the Win8 blob once to enable some devices */
-		if (usage->usage_index == 0)
-			mt_get_feature(hdev, field->report);
 		break;
 	}
 }
