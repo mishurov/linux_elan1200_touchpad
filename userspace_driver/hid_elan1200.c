@@ -208,7 +208,7 @@ static void send_report(struct elan_application *app, int delayed) {
 			report[j++].value = ct->y;
 		}
 
-		app->hw_state[i].in_report = 0;
+		ct->in_report = 0;
 	}
 
 	if (current_touches > 0) {
@@ -275,16 +275,27 @@ void timer_thread(union sigval sig)
 }
 
 
-static int needs_delay(struct contact *state) {
+static int check_delay_fix_unreported(struct contact *state) {
 	int current_touches = 0;
 	int num_reported = 0;
 
+	struct contact *ct;
+
 	for (int i = 0; i < MAX_CONTACTS; i++) {
-		if ((state[i]).in_report) {
+		ct = &(state[i]);
+		if (ct->in_report) {
 			num_reported++;
 		}
-		if ((state[i]).touch)
+		if (ct->touch) {
 			current_touches++;
+			// sometimes the touchpad forgets to report releases
+			// every contact which touches the surface is always
+			// reported otherwise mark it released
+			if (!ct->in_report) {
+				ct->touch = 0;
+				ct->in_report = 1;
+			}
+		}
 	}
 
 	return num_reported == 1 && current_touches == 0;
@@ -407,7 +418,7 @@ static void do_capture(int fd, int vfd) {
 
 		app.timestamp = compute_timestamp(&app, usages.scantime);
 
-		if (needs_delay(app.hw_state)) {
+		if (check_delay_fix_unreported(app.hw_state)) {
 			memcpy(app.delayed_state, app.hw_state, sizeof(app.hw_state));
 			ts.it_value.tv_nsec = DELAY_NS;
 			timer_settime(timer_id, 0, &ts, 0);

@@ -200,7 +200,7 @@ static void send_report(struct elan_application *app, bool delay)
 			input_event(input, EV_ABS, ABS_MT_POSITION_Y, ct->y);
 		}
 
-		app->hw_state[i].in_report = 0;
+		ct->in_report = 0;
 	}
 
 	if (current_touches > 0) {
@@ -247,17 +247,25 @@ static void timer_thread(struct timer_list *t)
 }
 
 
-static int needs_delay(struct contact *state) {
+static int check_delay_fix_unreported(struct contact *state) {
 	int i;
 	int current_touches = 0;
 	int num_reported = 0;
+	struct contact *ct;
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
-		if ((state[i]).in_report) {
+		ct = &(state[i]);
+		if (ct->in_report) {
 			num_reported++;
 		}
-		if ((state[i]).touch)
+		if (ct->touch) {
 			current_touches++;
+
+			if (!ct->in_report) {
+				ct->touch = 0;
+				ct->in_report = 1;
+			}
+		}
 	}
 
 	return num_reported == 1 && current_touches == 0;
@@ -302,7 +310,7 @@ static void elan_touchpad_report(struct elan_application *app,
 
 	app->timestamp = mt_compute_timestamp(app, *usages->scantime);
 
-	if (needs_delay(app->hw_state)) {
+	if (check_delay_fix_unreported(app->hw_state)) {
 		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
 		mod_timer(&app->timer, jiffies + nsecs_to_jiffies(DELAY_NS));
 		set_bit(DELAYED_FLAG_PENDING, &app->delayed_flags);
