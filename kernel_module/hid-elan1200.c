@@ -26,6 +26,8 @@ MODULE_LICENSE("GPL");
 #define DELAY 16
 #define DELAY_NS DELAY * 1000000
 
+#define DIAG2_TRESHOLD 95
+
 #ifdef MEASURE_TIME
 static unsigned long start_j, stop_j;
 
@@ -62,6 +64,9 @@ j_delta_msec(unsigned long *a, unsigned long *b) {
 // report size in bits without a report id byte
 #define ELAN_REPORT_SIZE_BITS (ELAN_REPORT_SIZE - 1) * 8
 
+#define WH_HID 0x900c5
+#define WH_INDEX 1
+
 struct contact {
 	bool in_report;
 	__s32 x;
@@ -82,6 +87,8 @@ struct elan_application {
 
 	int last_tracking_id;
 	int tracking_ids[MAX_CONTACTS];
+
+	int diag2;
 
 	unsigned long delayed_flags;
 	struct timer_list timer;
@@ -128,6 +135,8 @@ static void init_app_vars(struct elan_application *app) {
 	app->left_button_state = 0;
 	app->last_tracking_id = MT_ID_MIN;
 	app->num_received = 0;
+
+	app->diag2 = 0;
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		struct contact* hw = &app->hw_state[i];
@@ -179,10 +188,17 @@ static void send_report(struct elan_application *app, bool delay)
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
-		if (ct->touch)
-			current_touches++;
+		if (ct->touch) {
+			if (ct->in_report) {
+				current_touches++;
+			} else {
+				ct->touch = 0;
+				ct->in_report = 1;
+			}
+		}
 		if (!ct->in_report)
 			continue;
+
 		input_mt_slot(input, i);
 
 		if (ct->touch && app->tracking_ids[i] == MT_ID_NULL)
@@ -247,7 +263,7 @@ static void timer_thread(struct timer_list *t)
 }
 
 
-static int check_delay_fix_unreported(struct contact *state) {
+static int needs_delay(struct contact *state) {
 	int i;
 	int current_touches = 0;
 	int num_reported = 0;
@@ -255,17 +271,10 @@ static int check_delay_fix_unreported(struct contact *state) {
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
-		if (ct->in_report) {
+		if (ct->in_report)
 			num_reported++;
-		}
-		if (ct->touch) {
+		if (ct->touch)
 			current_touches++;
-
-			if (!ct->in_report) {
-				ct->touch = 0;
-				ct->in_report = 1;
-			}
-		}
 	}
 
 	return num_reported == 1 && current_touches == 0;
@@ -309,8 +318,7 @@ static void elan_touchpad_report(struct elan_application *app,
 	app->left_button_state = *usages->btn_left;
 
 	app->timestamp = mt_compute_timestamp(app, *usages->scantime);
-
-	if (check_delay_fix_unreported(app->hw_state)) {
+	if (app->diag2 > DIAG2_TRESHOLD && needs_delay(app->hw_state)) {
 		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
 		mod_timer(&app->timer, jiffies + nsecs_to_jiffies(DELAY_NS));
 		set_bit(DELAYED_FLAG_PENDING, &app->delayed_flags);
@@ -343,10 +351,18 @@ static void elan_report(struct hid_device *hdev, struct hid_report *report)
 static int elan_event(struct hid_device *hdev, struct hid_field *field,
 				struct hid_usage *usage, __s32 value)
 {
+	struct elan_device *td = hid_get_drvdata(hdev);
+	int width, height;
 	if (field->report && field->report->id == ELAN_REPORT_ID &&
 	    field->report->size == ELAN_REPORT_SIZE_BITS) {
 		if (hdev->claimed & HID_CLAIMED_HIDDEV && hdev->hiddev_hid_event)
 			hdev->hiddev_hid_event(hdev, field, usage, value);
+
+		if (usage->hid == WH_HID && usage->usage_index == WH_INDEX) {
+			width = (value & 0x0f) * 2;
+			height = value >> 4;
+			td->app.diag2 = width * width + height * height;
+		}
 		return 1;
 	}
 	return 0;

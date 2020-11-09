@@ -28,6 +28,8 @@
 #define DELAY 17
 #define DELAY_NS DELAY * 1000000
 
+#define DIAG2_TRESHOLD 95
+
 // gcc -o hid_elan1200 hid_elan1200.c -lrt -DMEASURE_TIME
 #ifdef MEASURE_TIME
 static struct timespec start_ts, stop_ts;
@@ -99,6 +101,8 @@ struct elan_application {
 
 	int last_tracking_id;
 	int tracking_ids[MAX_CONTACTS];
+
+	int diag2;
 
 	struct timespec ts;
 	int timestamp;
@@ -174,8 +178,17 @@ static void send_report(struct elan_application *app, int delayed) {
 
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
-		if (ct->touch)
-			current_touches++;
+		if (ct->touch) {
+			if (ct->in_report) {
+				current_touches++;
+			} else {
+			// sometimes the touchpad forgets to report releases
+			// every contact which touches the surface is always
+			// reported otherwise mark it released
+				ct->touch = 0;
+				ct->in_report = 1;
+			}
+		}
 		if (!ct->in_report)
 			continue;
 
@@ -275,7 +288,7 @@ void timer_thread(union sigval sig)
 }
 
 
-static int check_delay_fix_unreported(struct contact *state) {
+static int needs_delay(struct contact *state) {
 	int current_touches = 0;
 	int num_reported = 0;
 
@@ -283,19 +296,10 @@ static int check_delay_fix_unreported(struct contact *state) {
 
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
-		if (ct->in_report) {
+		if (ct->in_report)
 			num_reported++;
-		}
-		if (ct->touch) {
+		if (ct->touch)
 			current_touches++;
-			// sometimes the touchpad forgets to report releases
-			// every contact which touches the surface is always
-			// reported otherwise mark it released
-			if (!ct->in_report) {
-				ct->touch = 0;
-				ct->in_report = 1;
-			}
-		}
 	}
 
 	return num_reported == 1 && current_touches == 0;
@@ -323,6 +327,8 @@ void init_globals(struct elan_application *app) {
 	atomic_init(&app->delayed_flag_running, 0);
 	app->num_received = 0;
 
+	app->diag2 = 0;
+
 	clock_gettime(CLOCK_MONOTONIC_RAW, &app->ts);
 	app->timestamp = 0;
 	app->prev_scantime = 0;
@@ -339,7 +345,10 @@ void init_globals(struct elan_application *app) {
 }
 
 
-void buf_to_usages(unsigned char *buf, struct elan_usages *usages) {
+void buf_to_usages(unsigned char *buf, struct elan_usages *usages,
+			struct elan_application *app) {
+	int height, width;
+
 	usages->slot = buf[1] >> 4;
 	usages->touch = (buf[1] & 0x0f) == 3;
 	usages->x = ((buf[3] & 0x0f) << 8) | buf[2];
@@ -348,9 +357,18 @@ void buf_to_usages(unsigned char *buf, struct elan_usages *usages) {
 	usages->num_contacts = buf[8];
 	usages->tool = (buf[9] >> 1) < 38;
 	usages->btn_left = buf[9] & 0x01;
+	// some combined data of the time of contact
+	// which resets after inactivity
+	// contact area and clickpad button
+	// ? = buf[9]
 	// ? = buf[10]
-	// width = (buf[11] & 0x0f)
-	// height = (buf[11] >> 4)
+
+	// correct to touchpad propotions
+	// and give more weight to width
+	width = (buf[11] & 0x0f) * 2;
+	height = buf[11] >> 4;
+	// square diagonal
+	app->diag2 = width * width + height * height;
 }
 
 
@@ -381,7 +399,7 @@ static void do_capture(int fd, int vfd) {
 		is_release = (buf[1] & 0x0f) == 1;
 		if (!is_touch && !is_release)
 			continue;
-		buf_to_usages(buf, &usages);
+		buf_to_usages(buf, &usages, &app);
 
 		if (atomic_exchange(&app.delayed_flag_pending, 0)) {
 			if (usages.num_contacts == 1) {
@@ -418,7 +436,7 @@ static void do_capture(int fd, int vfd) {
 
 		app.timestamp = compute_timestamp(&app, usages.scantime);
 
-		if (check_delay_fix_unreported(app.hw_state)) {
+		if (app.diag2 > DIAG2_TRESHOLD && needs_delay(app.hw_state)) {
 			memcpy(app.delayed_state, app.hw_state, sizeof(app.hw_state));
 			ts.it_value.tv_nsec = DELAY_NS;
 			timer_settime(timer_id, 0, &ts, 0);
