@@ -107,3 +107,4 @@ References:
 - https://github.com/torvalds/linux/blob/master/drivers/input/input-mt.c
 - http://bitmath.org/code/mtdev/
 - https://docs.microsoft.com/en-us/windows-hardware/design/component-guidelines/windows-precision-touchpad-required-hid-top-level-collections
+- https://gitlab.com/iankelling/evhz/-/tree/master
