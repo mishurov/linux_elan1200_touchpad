@@ -28,7 +28,7 @@
 #define DELAY 17
 #define DELAY_NS DELAY * 1000000
 
-#define DIAG2_TRESHOLD 95
+#define DIAG2_TRESHOLD 85
 
 // gcc -o hid_elan1200 hid_elan1200.c -lrt -DMEASURE_TIME
 #ifdef MEASURE_TIME
@@ -178,19 +178,15 @@ static void send_report(struct elan_application *app, int delayed) {
 
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
-		if (ct->touch) {
-			if (ct->in_report) {
-				current_touches++;
-			} else {
+		if (!ct->in_report) {
 			// sometimes the touchpad forgets to report releases
 			// every contact which touches the surface is always
 			// reported otherwise mark it released
+			if (ct->touch)
 				ct->touch = 0;
-				ct->in_report = 1;
-			}
+			else
+				continue;
 		}
-		if (!ct->in_report)
-			continue;
 
 		report[j].type = EV_ABS;
 		report[j].code = ABS_MT_SLOT;
@@ -206,6 +202,8 @@ static void send_report(struct elan_application *app, int delayed) {
 		report[j++].value = app->tracking_ids[i];
 
 		if (app->tracking_ids[i] != MT_ID_NULL) {
+			current_touches++;
+
 			if (!ct->tool)
 				tool = MT_TOOL_PALM;
 			report[j].type = EV_ABS;
@@ -221,32 +219,12 @@ static void send_report(struct elan_application *app, int delayed) {
 			report[j++].value = ct->y;
 		}
 
-		ct->in_report = 0;
+		app->hw_state[i].in_report = 0;
 	}
 
-	if (current_touches > 0) {
-		int current_id;
-		int oldest_slot = 0;
-		int old_id = app->last_tracking_id;
-		for (int i = 0; i < MAX_CONTACTS; i++) {
-			if (app->tracking_ids[i] == MT_ID_NULL)
-				continue;
-			current_id = app->tracking_ids[i];
-			if ((current_id - old_id) & MT_ID_SGN) {
-				oldest_slot = i;
-				old_id = current_id;
-			}
-		}
-		if (app->tracking_ids[oldest_slot] != MT_ID_NULL) {
-			report[j].type = EV_ABS;
-			report[j].code = ABS_X;
-			report[j++].value = (state[oldest_slot]).x;
-
-			report[j].type = EV_ABS;
-			report[j].code = ABS_Y;
-			report[j++].value = (state[oldest_slot]).y;
-		}
-	}
+	report[j].type = EV_KEY;
+	report[j].code = BTN_LEFT;
+	report[j++].value = app->left_button_state;
 
 	report[j].type = EV_KEY;
 	report[j].code = BTN_TOUCH;
@@ -258,9 +236,29 @@ static void send_report(struct elan_application *app, int delayed) {
 		report[j++].value = current_touches == i + 1;
 	}
 
-	report[j].type = EV_KEY;
-	report[j].code = BTN_LEFT;
-	report[j++].value = app->left_button_state;
+	if (current_touches > 0) {
+		int current_id;
+		int oldest_slot = -1;
+		int old_id = app->last_tracking_id;
+		for (int i = 0; i < MAX_CONTACTS; i++) {
+			if (app->tracking_ids[i] == MT_ID_NULL)
+				continue;
+			current_id = app->tracking_ids[i];
+			if ((current_id - old_id) & MT_ID_SGN) {
+				oldest_slot = i;
+				old_id = current_id;
+			}
+		}
+		if (oldest_slot > -1) {
+			report[j].type = EV_ABS;
+			report[j].code = ABS_X;
+			report[j++].value = (state[oldest_slot]).x;
+
+			report[j].type = EV_ABS;
+			report[j].code = ABS_Y;
+			report[j++].value = (state[oldest_slot]).y;
+		}
+	}
 
 	report[j].type = EV_MSC;
 	report[j].code = MSC_TIMESTAMP;

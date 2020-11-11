@@ -26,7 +26,7 @@ MODULE_LICENSE("GPL");
 #define DELAY 16
 #define DELAY_NS DELAY * 1000000
 
-#define DIAG2_TRESHOLD 95
+#define DIAG2_TRESHOLD 85
 
 #ifdef MEASURE_TIME
 static unsigned long start_j, stop_j;
@@ -85,9 +85,6 @@ struct elan_application {
 	__s32 num_expected;
 	__s32 num_received;
 
-	int last_tracking_id;
-	int tracking_ids[MAX_CONTACTS];
-
 	int diag2;
 
 	unsigned long delayed_flags;
@@ -133,7 +130,6 @@ static void init_app_vars(struct elan_application *app) {
 	app->prev_scantime = 0;
 
 	app->left_button_state = 0;
-	app->last_tracking_id = MT_ID_MIN;
 	app->num_received = 0;
 
 	app->diag2 = 0;
@@ -144,7 +140,6 @@ static void init_app_vars(struct elan_application *app) {
 		hw->x = hw->y = 0;
 		hw->tool = 1;
 		hw->touch = 0;
-		app->tracking_ids[i] = MT_ID_NULL;
 	}
 
 	clear_bit(DELAYED_FLAG_PENDING, &app->delayed_flags);
@@ -178,71 +173,40 @@ static void send_report(struct elan_application *app, bool delay)
 	struct input_dev *input = app->input;
 
 	int i;
-	int oldest_slot;
-	int old_id;
-	int current_id;
-	int current_touches = 0;
 	int tool = MT_TOOL_FINGER;
 	struct contact *ct;
 	struct contact *state = delay ? app->delayed_state : app->hw_state;
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
-		if (ct->touch) {
-			if (ct->in_report) {
-				current_touches++;
-			} else {
+		if (!ct->in_report) {
+			if (ct->touch)
 				ct->touch = 0;
-				ct->in_report = 1;
-			}
+			else
+				continue;
 		}
-		if (!ct->in_report)
-			continue;
 
 		input_mt_slot(input, i);
 
-		if (ct->touch && app->tracking_ids[i] == MT_ID_NULL)
-			app->tracking_ids[i] = app->last_tracking_id++ & MT_ID_MAX;
-		if (!ct->touch)
-			app->tracking_ids[i] = MT_ID_NULL;
+		if (unlikely(!ct->tool))
+			tool = MT_TOOL_PALM;
 
-		input_event(input, EV_ABS, ABS_MT_TRACKING_ID, app->tracking_ids[i]);
+		input_mt_report_slot_state(input, tool, ct->touch);
 
-		if (app->tracking_ids[i] != MT_ID_NULL) {
-			if (!ct->tool)
-				tool = MT_TOOL_PALM;
-			input_event(input, EV_ABS, ABS_MT_TOOL_TYPE, tool);
+		if (ct->touch) {
 			input_event(input, EV_ABS, ABS_MT_POSITION_X, ct->x);
 			input_event(input, EV_ABS, ABS_MT_POSITION_Y, ct->y);
 		}
 
-		ct->in_report = 0;
+		app->hw_state[i].in_report = 0;
 	}
-
-	if (current_touches > 0) {
-		oldest_slot = 0;
-		old_id = app->last_tracking_id;
-		for (i = 0; i < MAX_CONTACTS; i++) {
-			if (app->tracking_ids[i] == MT_ID_NULL)
-				continue;
-			current_id = app->tracking_ids[i];
-			if ((current_id - old_id) & MT_ID_SGN) {
-				oldest_slot = i;
-				old_id = current_id;
-			}
-		}
-		if (app->tracking_ids[oldest_slot] != MT_ID_NULL) {
-			input_event(input, EV_ABS, ABS_X, (state[oldest_slot]).x);
-			input_event(input, EV_ABS, ABS_Y, (state[oldest_slot]).y);
-		}
-	}
-
-	input_event(input, EV_KEY, BTN_TOUCH, current_touches > 0);
-	input_mt_report_finger_count(input, current_touches);
 
 	input_event(input, EV_KEY, BTN_LEFT, app->left_button_state);
 
+	input_mt_sync_frame(input);
+
 	input_event(input, EV_MSC, MSC_TIMESTAMP, app->timestamp);
+
 	input_sync(input);
 }
 
@@ -492,6 +456,7 @@ static int elan_input_configured(struct hid_device *hdev, struct hid_input *hi)
 
 	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
 	ret = input_mt_init_slots(input, MAX_CONTACTS, INPUT_MT_POINTER);
+
 	if (ret)
 		return ret;
 
