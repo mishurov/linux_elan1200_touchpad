@@ -28,7 +28,7 @@
 #define DELAY 17
 #define DELAY_NS DELAY * 1000000
 
-#define DIAG2_TRESHOLD 85
+#define AREA_TRESHOLD 16
 
 // gcc -o hid_elan1200 hid_elan1200.c -lrt -DMEASURE_TIME
 #ifdef MEASURE_TIME
@@ -102,7 +102,7 @@ struct elan_application {
 	int last_tracking_id;
 	int tracking_ids[MAX_CONTACTS];
 
-	int diag2;
+	int area;
 
 	struct timespec ts;
 	int timestamp;
@@ -168,13 +168,13 @@ static int compute_timestamp(struct elan_application *app, int value)
 }
 
 
-static void send_report(struct elan_application *app, int delayed) {
+static void send_report(struct elan_application *app, int delay) {
 	int j = 0;
 	struct contact *ct;
 	int current_touches = 0;
 	int tool = MT_TOOL_FINGER;
 
-	struct contact *state = delayed ? app->delayed_state : app->hw_state;
+	struct contact *state = delay ? app->delayed_state : app->hw_state;
 
 	for (int i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
@@ -182,7 +182,7 @@ static void send_report(struct elan_application *app, int delayed) {
 			// sometimes the touchpad forgets to report releases
 			// every contact which touches the surface is always
 			// reported otherwise mark it released
-			if (ct->touch)
+			if (ct->touch && !delay)
 				ct->touch = 0;
 			else
 				continue;
@@ -286,24 +286,6 @@ void timer_thread(union sigval sig)
 }
 
 
-static int needs_delay(struct contact *state) {
-	int current_touches = 0;
-	int num_reported = 0;
-
-	struct contact *ct;
-
-	for (int i = 0; i < MAX_CONTACTS; i++) {
-		ct = &(state[i]);
-		if (ct->in_report)
-			num_reported++;
-		if (ct->touch)
-			current_touches++;
-	}
-
-	return num_reported == 1 && current_touches == 0;
-}
-
-
 void init_globals(struct elan_application *app) {
 	se.sigev_notify = SIGEV_THREAD;
 	se.sigev_value.sival_ptr = app;
@@ -325,7 +307,7 @@ void init_globals(struct elan_application *app) {
 	atomic_init(&app->delayed_flag_running, 0);
 	app->num_received = 0;
 
-	app->diag2 = 0;
+	app->area = 0;
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &app->ts);
 	app->timestamp = 0;
@@ -355,18 +337,16 @@ void buf_to_usages(unsigned char *buf, struct elan_usages *usages,
 	usages->num_contacts = buf[8];
 	usages->tool = (buf[9] >> 1) < 38;
 	usages->btn_left = buf[9] & 0x01;
-	// some combined data of the time of contact
-	// which resets after inactivity
-	// contact area and clickpad button
+
 	// ? = buf[9]
 	// ? = buf[10]
+	// some combined data of the duration of contact
+	// which resets after inactivity,
+	// contact area and clickpad button
 
-	// correct to touchpad propotions
-	// and give more weight to width
-	width = (buf[11] & 0x0f) * 2;
+	width = buf[11] & 0x0f;
 	height = buf[11] >> 4;
-	// square diagonal
-	app->diag2 = width * width + height * height;
+	app->area = width * height;
 }
 
 
@@ -434,7 +414,7 @@ static void do_capture(int fd, int vfd) {
 
 		app.timestamp = compute_timestamp(&app, usages.scantime);
 
-		if (app.diag2 > DIAG2_TRESHOLD && needs_delay(app.hw_state)) {
+		if (app.area > AREA_TRESHOLD && usages.num_contacts == 1 && !usages.touch) {
 			memcpy(app.delayed_state, app.hw_state, sizeof(app.hw_state));
 			ts.it_value.tv_nsec = DELAY_NS;
 			timer_settime(timer_id, 0, &ts, 0);

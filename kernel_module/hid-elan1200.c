@@ -26,7 +26,7 @@ MODULE_LICENSE("GPL");
 #define DELAY 16
 #define DELAY_NS DELAY * 1000000
 
-#define DIAG2_TRESHOLD 85
+#define AREA_TRESHOLD 16
 
 #ifdef MEASURE_TIME
 static unsigned long start_j, stop_j;
@@ -85,7 +85,7 @@ struct elan_application {
 	__s32 num_expected;
 	__s32 num_received;
 
-	int diag2;
+	int area;
 
 	unsigned long delayed_flags;
 	struct timer_list timer;
@@ -132,7 +132,7 @@ static void init_app_vars(struct elan_application *app) {
 	app->left_button_state = 0;
 	app->num_received = 0;
 
-	app->diag2 = 0;
+	app->area = 0;
 
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		struct contact* hw = &app->hw_state[i];
@@ -180,7 +180,7 @@ static void send_report(struct elan_application *app, bool delay)
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
 		if (!ct->in_report) {
-			if (ct->touch)
+			if (ct->touch && !delay)
 				ct->touch = 0;
 			else
 				continue;
@@ -227,24 +227,6 @@ static void timer_thread(struct timer_list *t)
 }
 
 
-static int needs_delay(struct contact *state) {
-	int i;
-	int current_touches = 0;
-	int num_reported = 0;
-	struct contact *ct;
-
-	for (i = 0; i < MAX_CONTACTS; i++) {
-		ct = &(state[i]);
-		if (ct->in_report)
-			num_reported++;
-		if (ct->touch)
-			current_touches++;
-	}
-
-	return num_reported == 1 && current_touches == 0;
-}
-
-
 static void elan_touchpad_report(struct elan_application *app,
 					struct elan_usages *usages) {
 	struct contact *ct;
@@ -282,7 +264,8 @@ static void elan_touchpad_report(struct elan_application *app,
 	app->left_button_state = *usages->btn_left;
 
 	app->timestamp = mt_compute_timestamp(app, *usages->scantime);
-	if (app->diag2 > DIAG2_TRESHOLD && needs_delay(app->hw_state)) {
+
+	if (app->area > AREA_TRESHOLD && *usages->num_contacts == 1 && !*usages->touch) {
 		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
 		mod_timer(&app->timer, jiffies + nsecs_to_jiffies(DELAY_NS));
 		set_bit(DELAYED_FLAG_PENDING, &app->delayed_flags);
@@ -323,9 +306,9 @@ static int elan_event(struct hid_device *hdev, struct hid_field *field,
 			hdev->hiddev_hid_event(hdev, field, usage, value);
 
 		if (usage->hid == WH_HID && usage->usage_index == WH_INDEX) {
-			width = (value & 0x0f) * 2;
+			width = value & 0x0f;
 			height = value >> 4;
-			td->app.diag2 = width * width + height * height;
+			td->app.area = width * height;
 		}
 		return 1;
 	}
