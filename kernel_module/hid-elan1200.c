@@ -168,7 +168,7 @@ static int mt_compute_timestamp(struct elan_application *app, __s32 value)
 }
 
 
-static void send_report(struct elan_application *app, bool delay)
+static void send_report(struct elan_application *app, bool delay, bool sticky)
 {
 	struct input_dev *input = app->input;
 
@@ -180,7 +180,7 @@ static void send_report(struct elan_application *app, bool delay)
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
 		if (!ct->in_report) {
-			if (ct->touch && !delay)
+			if (sticky && ct->touch)
 				ct->touch = 0;
 			else
 				continue;
@@ -198,8 +198,11 @@ static void send_report(struct elan_application *app, bool delay)
 			input_event(input, EV_ABS, ABS_MT_POSITION_Y, ct->y);
 		}
 
-		app->hw_state[i].in_report = 0;
+		ct->in_report = 0;
 	}
+
+	if (delay)
+		memcpy(app->hw_state, app->delayed_state, sizeof(app->hw_state));
 
 	input_event(input, EV_KEY, BTN_LEFT, app->left_button_state);
 
@@ -217,7 +220,7 @@ static void timer_thread(struct timer_list *t)
 
 	set_bit(DELAYED_FLAG_RUNNING, &app->delayed_flags);
 	if (test_and_clear_bit(DELAYED_FLAG_PENDING, &app->delayed_flags)) {
-		send_report(app, 1);
+		send_report(app, 1, 1);
 	}
 	clear_bit(DELAYED_FLAG_RUNNING, &app->delayed_flags);
 #ifdef MEASURE_TIME
@@ -230,10 +233,11 @@ static void timer_thread(struct timer_list *t)
 static void elan_touchpad_report(struct elan_application *app,
 					struct elan_usages *usages) {
 	struct contact *ct;
+	bool last_release;
 
 	if (test_and_clear_bit(DELAYED_FLAG_PENDING, &app->delayed_flags)) {
 		if (*usages->num_contacts == 1) {
-			send_report(app, 1);
+			send_report(app, 1, 1);
 			udelay(INPUT_SYNC_UDELAY);
 		}
 #ifdef MEASURE_TIME
@@ -265,7 +269,9 @@ static void elan_touchpad_report(struct elan_application *app,
 
 	app->timestamp = mt_compute_timestamp(app, *usages->scantime);
 
-	if (app->area > AREA_TRESHOLD && *usages->num_contacts == 1 && !*usages->touch) {
+	last_release = *usages->num_contacts == 1 && !*usages->touch;
+
+	if (last_release && app->area > AREA_TRESHOLD) {
 		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
 		mod_timer(&app->timer, jiffies + nsecs_to_jiffies(DELAY_NS));
 		set_bit(DELAYED_FLAG_PENDING, &app->delayed_flags);
@@ -274,7 +280,7 @@ static void elan_touchpad_report(struct elan_application *app,
 		start_j = jiffies;
 #endif
 	} else {
-		send_report(app, 0);
+		send_report(app, 0, last_release);
 	}
 }
 

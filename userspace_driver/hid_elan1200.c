@@ -168,7 +168,7 @@ static int compute_timestamp(struct elan_application *app, int value)
 }
 
 
-static void send_report(struct elan_application *app, int delay) {
+static void send_report(struct elan_application *app, int delay, int sticky) {
 	int j = 0;
 	struct contact *ct;
 	int current_touches = 0;
@@ -182,7 +182,7 @@ static void send_report(struct elan_application *app, int delay) {
 			// sometimes the touchpad forgets to report releases
 			// every contact which touches the surface is always
 			// reported otherwise mark it released
-			if (ct->touch && !delay)
+			if (sticky && ct->touch)
 				ct->touch = 0;
 			else
 				continue;
@@ -219,8 +219,11 @@ static void send_report(struct elan_application *app, int delay) {
 			report[j++].value = ct->y;
 		}
 
-		app->hw_state[i].in_report = 0;
+		ct->in_report = 0;
 	}
+
+	if (delay)
+		memcpy(app->hw_state, app->delayed_state, sizeof(app->hw_state));
 
 	report[j].type = EV_KEY;
 	report[j].code = BTN_LEFT;
@@ -276,7 +279,7 @@ void timer_thread(union sigval sig)
 	struct elan_application *app = (struct elan_application*)sig.sival_ptr;
 	atomic_store(&app->delayed_flag_running, 1);
 	if (atomic_exchange(&app->delayed_flag_pending, 0)) {
-		send_report(app, 1);
+		send_report(app, 1, 1);
 	}
 	atomic_store(&app->delayed_flag_running, 0);
 #ifdef MEASURE_TIME
@@ -363,6 +366,8 @@ static void do_capture(int fd, int vfd) {
 	int is_release;
 	int rc;
 
+	int last_release;
+
 	while(!stop) {
 		if ((rc = read(fd, buf, sizeof(buf))) < 0 && !stop) {
 			fprintf(stderr, "Error reading the hidraw device file.\n");
@@ -381,7 +386,7 @@ static void do_capture(int fd, int vfd) {
 
 		if (atomic_exchange(&app.delayed_flag_pending, 0)) {
 			if (usages.num_contacts == 1) {
-				send_report(&app, 1);
+				send_report(&app, 1, 1);
 				nanosleep(&input_sync_ts, &input_sync_ts);
 			}
 #ifdef MEASURE_TIME
@@ -414,7 +419,9 @@ static void do_capture(int fd, int vfd) {
 
 		app.timestamp = compute_timestamp(&app, usages.scantime);
 
-		if (app.area > AREA_TRESHOLD && usages.num_contacts == 1 && !usages.touch) {
+		last_release = usages.num_contacts == 1 && !usages.touch;
+
+		if (last_release && app.area > AREA_TRESHOLD) {
 			memcpy(app.delayed_state, app.hw_state, sizeof(app.hw_state));
 			ts.it_value.tv_nsec = DELAY_NS;
 			timer_settime(timer_id, 0, &ts, 0);
@@ -424,7 +431,7 @@ static void do_capture(int fd, int vfd) {
 			clock_gettime(CLOCK_MONOTONIC_RAW, &start_ts);
 #endif
 		} else {
-			send_report(&app, 0);
+			send_report(&app, 0, last_release);
 		}
 	}
 }
