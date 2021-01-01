@@ -168,7 +168,7 @@ static int mt_compute_timestamp(struct elan_application *app, __s32 value)
 }
 
 
-static void send_report(struct elan_application *app, bool delay, bool sticky)
+static void send_report(struct elan_application *app, bool delay)
 {
 	struct input_dev *input = app->input;
 
@@ -180,7 +180,7 @@ static void send_report(struct elan_application *app, bool delay, bool sticky)
 	for (i = 0; i < MAX_CONTACTS; i++) {
 		ct = &(state[i]);
 		if (!ct->in_report) {
-			if (sticky && ct->touch)
+			if (ct->touch)
 				ct->touch = 0;
 			else
 				continue;
@@ -220,7 +220,7 @@ static void timer_thread(struct timer_list *t)
 
 	set_bit(DELAYED_FLAG_RUNNING, &app->delayed_flags);
 	if (test_and_clear_bit(DELAYED_FLAG_PENDING, &app->delayed_flags)) {
-		send_report(app, 1, 1);
+		send_report(app, 1);
 	}
 	clear_bit(DELAYED_FLAG_RUNNING, &app->delayed_flags);
 #ifdef MEASURE_TIME
@@ -233,11 +233,10 @@ static void timer_thread(struct timer_list *t)
 static void elan_touchpad_report(struct elan_application *app,
 					struct elan_usages *usages) {
 	struct contact *ct;
-	bool last_release;
 
 	if (test_and_clear_bit(DELAYED_FLAG_PENDING, &app->delayed_flags)) {
 		if (*usages->num_contacts == 1) {
-			send_report(app, 1, 1);
+			send_report(app, 1);
 			udelay(INPUT_SYNC_UDELAY);
 		}
 #ifdef MEASURE_TIME
@@ -269,9 +268,7 @@ static void elan_touchpad_report(struct elan_application *app,
 
 	app->timestamp = mt_compute_timestamp(app, *usages->scantime);
 
-	last_release = *usages->num_contacts == 1 && !*usages->touch;
-
-	if (last_release && app->area > AREA_TRESHOLD) {
+	if (*usages->num_contacts == 1 && !*usages->touch && app->area > AREA_TRESHOLD) {
 		memcpy(app->delayed_state, app->hw_state, sizeof(app->hw_state));
 		mod_timer(&app->timer, jiffies + nsecs_to_jiffies(DELAY_NS));
 		set_bit(DELAYED_FLAG_PENDING, &app->delayed_flags);
@@ -280,7 +277,7 @@ static void elan_touchpad_report(struct elan_application *app,
 		start_j = jiffies;
 #endif
 	} else {
-		send_report(app, 0, last_release);
+		send_report(app, 0);
 	}
 }
 
